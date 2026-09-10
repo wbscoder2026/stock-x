@@ -47,7 +47,7 @@ func main() {
 	case "serve", "":
 		runServe(cfg, st, mgr)
 	case "backfill":
-		if err := mgr.DoBackfill(ctx, logProgress); err != nil {
+		if err := mgr.DoBackfill(ctx, logProgress, "", "", nil); err != nil {
 			log.Fatal(err)
 		}
 	case "sync":

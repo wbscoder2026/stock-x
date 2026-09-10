@@ -36,30 +36,48 @@ func toSyncProgress(p ProgressFunc) func(done, total int, msg string) {
 	}
 }
 
-// Manager 同一时刻只跑一个重任务。
+type liveJob struct {
+	id     string
+	typ    string
+	cancel context.CancelFunc
+}
+
+// RunningJob 正在执行的任务。
+type RunningJob struct {
+	ID   string `json:"id"`
+	Type string `json:"type"`
+}
+
+// Manager 同类任务互斥；扫描可与回填/增量并行。
 type Manager struct {
 	Store *store.Store
 	Sync  *syncer.Syncer
 	Cfg   config.Config
 
-	runMu    sync.Mutex
 	hub      *Hub
 	scanArgs sync.Map // jobID -> ScanArg
 
-	ctlMu   sync.Mutex
-	cancel  context.CancelFunc
-	curID   string
-	curType string
-	busy    bool
+	ctlMu sync.Mutex
+	live  map[string]*liveJob
+
+	beforeRun func(ctx context.Context, typ string)
 }
 
-// ScanArg 扫描区间；都空则用库内最新交易日。
+// ScanArg 扫描或区间回填参数；扫描时都空则用库内最新交易日。
 type ScanArg struct {
 	From, To string
+	Symbols  []string
 }
 
 func New(st *store.Store, sy *syncer.Syncer, cfg config.Config) *Manager {
-	return &Manager{Store: st, Sync: sy, Cfg: cfg, hub: newHub()}
+	return &Manager{Store: st, Sync: sy, Cfg: cfg, hub: newHub(), live: map[string]*liveJob{}}
+}
+
+func jobConflicts(a, b string) bool {
+	if a == b {
+		return true
+	}
+	return (a == "backfill" && b == "sync") || (a == "sync" && b == "backfill")
 }
 
 func (m *Manager) Hub() *Hub { return m.hub }
@@ -82,6 +100,15 @@ func SeedConfigs() []store.StrategyConfig {
 	return out
 }
 
+func (m *Manager) canStartLocked(typ string) error {
+	for _, j := range m.live {
+		if jobConflicts(j.typ, typ) {
+			return fmt.Errorf("%s 已在运行", j.typ)
+		}
+	}
+	return nil
+}
+
 // Submit 立即落库并后台执行，返回初始 Job。
 func (m *Manager) Submit(ctx context.Context, typ string, arg ...ScanArg) (store.JobRun, error) {
 	typ = strings.TrimSpace(typ)
@@ -91,54 +118,49 @@ func (m *Manager) Submit(ctx context.Context, typ string, arg ...ScanArg) (store
 		return store.JobRun{}, fmt.Errorf("未知任务类型 %s", typ)
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
+	id := newID()
+	runCtx, cancel := context.WithCancel(context.Background())
 	m.ctlMu.Lock()
-	if m.busy {
+	if err := m.canStartLocked(typ); err != nil {
 		m.ctlMu.Unlock()
-		return store.JobRun{}, fmt.Errorf("已有任务在运行，请先暂停")
+		cancel()
+		return store.JobRun{}, err
 	}
-	m.busy = true
+	m.live[id] = &liveJob{id: id, typ: typ, cancel: cancel}
 	m.ctlMu.Unlock()
 
 	j := store.JobRun{
-		ID: newID(), Type: typ, Status: "pending",
+		ID: id, Type: typ, Status: "pending",
 		StartedAt: now,
 	}
 	if err := m.Store.InsertJob(j); err != nil {
-		m.ctlMu.Lock()
-		m.busy = false
-		m.ctlMu.Unlock()
+		cancel()
+		m.dropLive(id)
 		return store.JobRun{}, err
 	}
 	var sa ScanArg
 	if len(arg) > 0 {
 		sa = arg[0]
 	}
-	if typ == "scan" {
+	if typ == "scan" || typ == "backfill" {
 		m.scanArgs.Store(j.ID, sa)
 	}
-	go m.run(j.ID, typ)
+	go m.run(runCtx, cancel, j.ID, typ)
 	return j, nil
 }
 
-func (m *Manager) run(id, typ string) {
-	ctx, cancel := context.WithCancel(context.Background())
+func (m *Manager) dropLive(id string) {
 	m.ctlMu.Lock()
-	m.cancel = cancel
-	m.curID = id
-	m.curType = typ
+	delete(m.live, id)
 	m.ctlMu.Unlock()
+}
+
+func (m *Manager) run(ctx context.Context, cancel context.CancelFunc, id, typ string) {
 	defer func() {
 		cancel()
-		m.ctlMu.Lock()
-		m.cancel = nil
-		m.curID = ""
-		m.curType = ""
-		m.busy = false
-		m.ctlMu.Unlock()
+		m.dropLive(id)
 	}()
 
-	m.runMu.Lock()
-	defer m.runMu.Unlock()
 	j, err := m.Store.GetJob(id)
 	if err != nil {
 		return
@@ -146,6 +168,9 @@ func (m *Manager) run(id, typ string) {
 	j.Status = "running"
 	j.StartedAt = time.Now().UTC().Format(time.RFC3339)
 	_ = m.update(j)
+	if m.beforeRun != nil {
+		m.beforeRun(ctx, typ)
+	}
 
 	progress := func(pct int, line string) {
 		if pct < 0 {
@@ -170,7 +195,11 @@ func (m *Manager) run(id, typ string) {
 	var runErr error
 	switch typ {
 	case "backfill":
-		runErr = m.DoBackfill(ctx, progress)
+		var ba ScanArg
+		if v, ok := m.scanArgs.LoadAndDelete(id); ok {
+			ba, _ = v.(ScanArg)
+		}
+		runErr = m.DoBackfill(ctx, progress, ba.From, ba.To, ba.Symbols)
 	case "sync":
 		_, runErr = m.DoSync(ctx, progress)
 	case "scan":
@@ -206,36 +235,65 @@ func (m *Manager) update(j store.JobRun) error {
 	return err
 }
 
-// Pause 取消当前任务；回填进度按已入库日期保留。
-func (m *Manager) Pause() error {
+// Pause 取消正在跑的任务；typ 为空则全部取消。回填进度按已入库日期保留。
+func (m *Manager) Pause(typ string) error {
+	typ = strings.TrimSpace(typ)
 	m.ctlMu.Lock()
 	defer m.ctlMu.Unlock()
-	if m.cancel == nil {
-		return fmt.Errorf("没有正在运行的任务")
+	n := 0
+	for _, j := range m.live {
+		if typ == "" || j.typ == typ {
+			j.cancel()
+			n++
+		}
 	}
-	m.cancel()
+	if n == 0 {
+		if typ == "" {
+			return fmt.Errorf("没有正在运行的任务")
+		}
+		return fmt.Errorf("没有正在运行的 %s 任务", typ)
+	}
 	return nil
 }
 
-// Current 正在跑的任务。
-func (m *Manager) Current() (id, typ string, ok bool) {
+// Running 正在跑的全部任务。
+func (m *Manager) Running() []RunningJob {
 	m.ctlMu.Lock()
 	defer m.ctlMu.Unlock()
-	if m.curID == "" {
-		return "", "", false
+	out := make([]RunningJob, 0, len(m.live))
+	for _, j := range m.live {
+		out = append(out, RunningJob{ID: j.id, Type: j.typ})
 	}
-	return m.curID, m.curType, true
+	return out
 }
 
-func (m *Manager) DoBackfill(ctx context.Context, progress ProgressFunc) error {
+// Current 正在跑的任务；优先回填。
+func (m *Manager) Current() (id, typ string, ok bool) {
+	js := m.Running()
+	if len(js) == 0 {
+		return "", "", false
+	}
+	for _, j := range js {
+		if j.Type == "backfill" {
+			return j.ID, j.Type, true
+		}
+	}
+	return js[0].ID, js[0].Type, true
+}
+
+func (m *Manager) DoBackfill(ctx context.Context, progress ProgressFunc, from, to string, symbols []string) error {
 	if m.Sync == nil {
 		return fmt.Errorf("未配置 syncer")
 	}
 	if progress == nil {
 		progress = func(int, string) {}
 	}
-	progress(1, "开始回填")
-	return m.Sync.Backfill(ctx, toSyncProgress(progress))
+	if strings.TrimSpace(from) == "" && strings.TrimSpace(to) == "" && len(symbols) == 0 {
+		progress(1, "开始回填")
+		return m.Sync.Backfill(ctx, toSyncProgress(progress))
+	}
+	progress(1, fmt.Sprintf("区间回填 %s ~ %s", from, to))
+	return m.Sync.BackfillRange(ctx, from, to, symbols, toSyncProgress(progress))
 }
 
 func (m *Manager) DoSync(ctx context.Context, progress ProgressFunc) (int, error) {

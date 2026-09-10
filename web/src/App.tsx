@@ -2,6 +2,7 @@ import { Layout, Menu, Typography } from 'antd'
 import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import PicksPage from './pages/PicksPage'
 import KlinePage from './pages/KlinePage'
+import HistoryPage from './pages/HistoryPage'
 import StrategiesPage from './pages/StrategiesPage'
 import JobsPage from './pages/JobsPage'
 import BacktestPage from './pages/BacktestPage'
@@ -9,6 +10,7 @@ import BacktestPage from './pages/BacktestPage'
 const items = [
   { key: '/picks', label: '选股' },
   { key: '/kline', label: 'K线' },
+  { key: '/history', label: '历史K线' },
   { key: '/strategies', label: '策略' },
   { key: '/jobs', label: '任务/回填' },
   { key: '/backtest', label: '回测' },
@@ -43,6 +45,7 @@ export default function App() {
           <Route path="/" element={<Navigate to="/picks" replace />} />
           <Route path="/picks" element={<PicksPage />} />
           <Route path="/kline" element={<KlinePage />} />
+          <Route path="/history" element={<HistoryPage />} />
           <Route path="/strategies" element={<StrategiesPage />} />
           <Route path="/jobs" element={<JobsPage />} />
           <Route path="/backtest" element={<BacktestPage />} />

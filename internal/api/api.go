@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -35,6 +36,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", s.health)
 	mux.HandleFunc("GET /api/stocks", s.stocks)
+	mux.HandleFunc("GET /api/kline-coverage", s.klineCoverage)
 	mux.HandleFunc("GET /api/stocks/{code}/kline", s.kline)
 	mux.HandleFunc("GET /api/strategies", s.listStrategies)
 	mux.HandleFunc("PUT /api/strategies/{id}", s.putStrategy)
@@ -88,8 +90,20 @@ func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 		"bars":     bars,
 		"max_date": maxDate,
 	}
-	if id, typ, ok := s.Jobs.Current(); ok {
-		out["running"] = map[string]string{"id": id, "type": typ, "status": "running"}
+	if running := s.Jobs.Running(); len(running) > 0 {
+		jobs := make([]map[string]string, 0, len(running))
+		for _, j := range running {
+			jobs = append(jobs, map[string]string{"id": j.ID, "type": j.Type, "status": "running"})
+		}
+		out["running_jobs"] = jobs
+		pick := jobs[0]
+		for _, j := range jobs {
+			if j["type"] == "backfill" {
+				pick = j
+				break
+			}
+		}
+		out["running"] = pick
 	}
 	writeOK(w, out)
 }
@@ -111,6 +125,30 @@ func (s *Server) stocks(w http.ResponseWriter, r *http.Request) {
 		out = append(out, hit{st.Symbol, st.Name, st.Market})
 	}
 	writeOK(w, out)
+}
+
+func (s *Server) klineCoverage(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	offset, _ := strconv.Atoi(q.Get("offset"))
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	list, total, err := s.Store.ListKlineCoverage(q.Get("q"), offset, limit)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	type row struct {
+		Symbol    string `json:"symbol"`
+		Name      string `json:"name"`
+		Market    string `json:"market"`
+		StartDate string `json:"start_date"`
+		EndDate   string `json:"end_date"`
+		Bars      int    `json:"bars"`
+	}
+	items := make([]row, 0, len(list))
+	for _, c := range list {
+		items = append(items, row{c.Symbol, c.Name, c.Market, c.StartDate, c.EndDate, c.Bars})
+	}
+	writeOK(w, map[string]any{"total": total, "items": items})
 }
 
 func (s *Server) kline(w http.ResponseWriter, r *http.Request) {
@@ -222,9 +260,12 @@ func (s *Server) picks(w http.ResponseWriter, r *http.Request) {
 	from := r.URL.Query().Get("from")
 	to := r.URL.Query().Get("to")
 	stgy := r.URL.Query().Get("strategy")
+	symbol := r.URL.Query().Get("symbol")
 	var list []store.ScanPick
 	var err error
 	switch {
+	case strings.TrimSpace(symbol) != "":
+		list, err = s.Store.ListPicksBySymbol(symbol, stgy)
 	case strings.TrimSpace(from) != "" || strings.TrimSpace(to) != "":
 		list, err = s.Store.ListPicksRange(from, to, stgy)
 	default:
@@ -266,15 +307,16 @@ func jobDTO(j store.JobRun) map[string]any {
 
 func (s *Server) postJob(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Type string `json:"type"`
-		From string `json:"from"`
-		To   string `json:"to"`
+		Type    string   `json:"type"`
+		From    string   `json:"from"`
+		To      string   `json:"to"`
+		Symbols []string `json:"symbols"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, "无效 JSON")
 		return
 	}
-	j, err := s.Jobs.Submit(r.Context(), body.Type, job.ScanArg{From: body.From, To: body.To})
+	j, err := s.Jobs.Submit(r.Context(), body.Type, job.ScanArg{From: body.From, To: body.To, Symbols: body.Symbols})
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -285,8 +327,12 @@ func (s *Server) postJob(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(envelope{OK: true, Data: b})
 }
 
-func (s *Server) pauseJob(w http.ResponseWriter, _ *http.Request) {
-	if err := s.Jobs.Pause(); err != nil {
+func (s *Server) pauseJob(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Type string `json:"type"`
+	}
+	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body)
+	if err := s.Jobs.Pause(body.Type); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}

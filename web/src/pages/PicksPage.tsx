@@ -4,7 +4,7 @@ import { Alert, App, Button, DatePicker, Space, Table, Tabs, Typography } from '
 import type { ColumnsType } from 'antd/es/table'
 import type { Dayjs } from 'dayjs'
 import dayjs from 'dayjs'
-import { fetchHealth, fetchJob, fetchPicks, parseExtra, pauseJob, postJob, resumeBackfill } from '../api'
+import { fetchHealth, fetchJob, fetchPicks, parseExtra, pauseJob, postJob, resumeBackfill, runningTypes } from '../api'
 import type { Health, Job, PickRow } from '../types'
 
 type RangeValue = [Dayjs | null, Dayjs | null] | null
@@ -37,6 +37,8 @@ export default function PicksPage() {
   const from = range?.[0]?.format('YYYY-MM-DD')
   const to = range?.[1]?.format('YYYY-MM-DD')
   const emptyDB = (health?.bars ?? 0) === 0
+  const runTypes = runningTypes(health)
+  const backfillOn = filling || runTypes.has('backfill')
 
   const loadHealth = useCallback(async () => {
     try {
@@ -98,7 +100,12 @@ export default function PicksPage() {
     {
       title: '代码',
       dataIndex: 'symbol',
-      render: (v: string) => <Link to={`/kline?code=${encodeURIComponent(v)}`}>{v}</Link>,
+      render: (v: string, row) => {
+        const q = new URLSearchParams({ code: v })
+        if (row.as_of) q.set('date', row.as_of)
+        if (row.strategy) q.set('strategy', row.strategy)
+        return <Link to={`/kline?${q}`}>{v}</Link>
+      },
     },
     { title: '名称', dataIndex: 'name' },
     ...extraKeys.map((k) => ({
@@ -141,7 +148,7 @@ export default function PicksPage() {
 
   async function pauseFill() {
     try {
-      await pauseJob()
+      await pauseJob('backfill')
       message.success('正在暂停，稍等当前批次写完')
     } catch (e) {
       message.error(e instanceof Error ? e.message : '暂停失败')
@@ -244,16 +251,16 @@ export default function PicksPage() {
           选股结果
         </Typography.Title>
         <DatePicker.RangePicker value={range} onChange={(v) => setRange(v)} allowClear={false} />
-        <Button type="primary" loading={scanning} disabled={filling} onClick={() => void scanNow()}>
+        <Button type="primary" loading={scanning} onClick={() => void scanNow()}>
           扫描该区间
         </Button>
-        <Button loading={filling} disabled={!!health?.running} onClick={() => void backfill()}>
+        <Button loading={filling} disabled={runTypes.has('backfill')} onClick={() => void backfill()}>
           回填历史K线
         </Button>
-        <Button danger disabled={!filling && health?.running?.type !== 'backfill'} onClick={() => void pauseFill()}>
+        <Button danger disabled={!backfillOn} onClick={() => void pauseFill()}>
           暂停回填
         </Button>
-        <Button disabled={filling || !!health?.running} onClick={() => void continueFill()}>
+        <Button disabled={runTypes.has('backfill')} onClick={() => void continueFill()}>
           继续回填
         </Button>
         <Button onClick={() => void load()}>刷新</Button>

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/wbscoder2026/stock-x/internal/baostock"
@@ -34,20 +35,28 @@ func (s *Syncer) runJobs(ctx context.Context, jobs []fetchJob, progress func(don
 		report(progress, already, total, "无待拉取任务")
 		return 0, nil
 	}
-	n := s.workerN()
-	report(progress, already, total, fmt.Sprintf("启动 %d 路并发拉取 %d 只", n, len(jobs)))
-
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	jobsCh := make(chan fetchJob, n*4)
-	writes := make(chan writeReq, n*4)
+	jobsCh := make(chan fetchJob, maxWorkers*4)
+	writes := make(chan writeReq, maxWorkers*4)
 
 	var fetchWG sync.WaitGroup
-	fetchWG.Add(n)
-	for range n {
+	var running atomic.Int32
+	var feederDone atomic.Bool
+	lastN := 0
+
+	spawn := func() {
+		running.Add(1)
+		fetchWG.Add(1)
 		go func() {
 			defer fetchWG.Done()
+			dropped := false
+			defer func() {
+				if !dropped {
+					running.Add(-1)
+				}
+			}()
 			var c *baostock.Client
 			defer drop(&c)
 			if err := s.ensureClient(ctx, &c); err != nil {
@@ -57,24 +66,67 @@ func (s *Syncer) runJobs(ctx context.Context, jobs []fetchJob, progress func(don
 				}
 				return
 			}
-			for job := range jobsCh {
-				if ctx.Err() != nil {
-					writes <- writeReq{symbol: job.symbol, err: ctx.Err()}
-					continue
+			for {
+				want := s.WorkerCount()
+				for {
+					n := running.Load()
+					if int(n) <= want {
+						break
+					}
+					if running.CompareAndSwap(n, n-1) {
+						dropped = true
+						return
+					}
 				}
-				bars, err := s.fetchSymbol(ctx, &c, job)
-				if baostock.IsBlacklisted(err) {
-					writes <- writeReq{symbol: job.symbol, err: err}
-					cancel()
+				select {
+				case <-ctx.Done():
 					return
+				case job, ok := <-jobsCh:
+					if !ok {
+						return
+					}
+					if ctx.Err() != nil {
+						writes <- writeReq{symbol: job.symbol, err: ctx.Err()}
+						return
+					}
+					bars, err := s.fetchSymbol(ctx, &c, job)
+					if baostock.IsBlacklisted(err) {
+						writes <- writeReq{symbol: job.symbol, err: err}
+						cancel()
+						return
+					}
+					writes <- writeReq{symbol: job.symbol, bars: bars, err: err}
+				case <-time.After(200 * time.Millisecond):
 				}
-				writes <- writeReq{symbol: job.symbol, bars: bars, err: err}
 			}
 		}()
 	}
 
+	adjust := func() {
+		want := s.WorkerCount()
+		if want != lastN {
+			if lastN == 0 {
+				report(progress, already, total, fmt.Sprintf("启动 %d 路并发拉取 %d 只", want, len(jobs)))
+			} else {
+				report(progress, already, total, fmt.Sprintf("回填并发调整为 %d 路", want))
+			}
+			lastN = want
+		}
+		if feederDone.Load() {
+			return
+		}
+		have := int(running.Load())
+		for have < want && ctx.Err() == nil {
+			spawn()
+			have++
+		}
+	}
+
 	go func() {
-		defer close(jobsCh)
+		defer func() {
+			close(jobsCh)
+			feederDone.Store(true)
+		}()
 		for _, j := range jobs {
 			select {
 			case <-ctx.Done():
@@ -84,8 +136,28 @@ func (s *Syncer) runJobs(ctx context.Context, jobs []fetchJob, progress func(don
 		}
 	}()
 
+	adjust()
+	tick := time.NewTicker(200 * time.Millisecond)
+	defer tick.Stop()
+	doneFetch := make(chan struct{})
 	go func() {
-		fetchWG.Wait()
+		defer close(doneFetch)
+		for {
+			if feederDone.Load() && running.Load() == 0 {
+				fetchWG.Wait()
+				return
+			}
+			select {
+			case <-ctx.Done():
+				fetchWG.Wait()
+				return
+			case <-tick.C:
+				adjust()
+			}
+		}
+	}()
+	go func() {
+		<-doneFetch
 		close(writes)
 	}()
 

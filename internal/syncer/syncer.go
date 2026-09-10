@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/wbscoder2026/stock-x/internal/baostock"
@@ -25,11 +26,13 @@ type Syncer struct {
 
 	loginMu   sync.Mutex
 	lastLogin time.Time
+	workers   atomic.Int32
 }
 
 const (
 	defaultStart   = "2024-01-01"
 	defaultWorkers = 4
+	minWorkers     = 1
 	maxWorkers     = 8
 	adjustForward  = "1" // 后复权
 	loginGap       = 400 * time.Millisecond
@@ -106,6 +109,78 @@ func (s *Syncer) Backfill(ctx context.Context, progress func(done, total int, ms
 	return err
 }
 
+// BackfillRange 按指定区间拉取日 K；symbols 空则全市场。已有日期会覆盖写入。
+func (s *Syncer) BackfillRange(ctx context.Context, from, to string, symbols []string, progress func(done, total int, msg string)) error {
+	if s.Store == nil {
+		return errors.New("syncer: Store 为空")
+	}
+	from, to, err := clipRange(from, to, todayCN(), s.startDate())
+	if err != nil {
+		return err
+	}
+	stocks, err := s.rangeStocks(ctx, symbols)
+	if err != nil {
+		return err
+	}
+	if len(stocks) == 0 {
+		return fmt.Errorf("没有可回填的股票")
+	}
+	jobs := make([]fetchJob, 0, len(stocks))
+	for _, st := range stocks {
+		jobs = append(jobs, fetchJob{symbol: st.Symbol, start: from, end: to})
+	}
+	report(progress, 0, len(jobs), fmt.Sprintf("回填 %s ~ %s，共 %d 只", from, to, len(jobs)))
+	_, err = s.runJobs(ctx, jobs, progress, len(jobs), 0)
+	return err
+}
+
+func (s *Syncer) rangeStocks(ctx context.Context, symbols []string) ([]store.Stock, error) {
+	if len(symbols) == 0 {
+		if _, err := s.RefreshSymbols(ctx); err != nil {
+			return nil, err
+		}
+		return s.listedStocks()
+	}
+	out := make([]store.Stock, 0, len(symbols))
+	seen := map[string]bool{}
+	for _, raw := range symbols {
+		sym := strings.TrimSpace(raw)
+		if sym == "" || seen[sym] {
+			continue
+		}
+		seen[sym] = true
+		st, ok, err := s.Store.GetStock(sym)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			st = store.Stock{Symbol: sym, Listed: true}
+		}
+		out = append(out, st)
+	}
+	return out, nil
+}
+
+func clipRange(from, to, today, startDate string) (string, string, error) {
+	from, to = strings.TrimSpace(from), strings.TrimSpace(to)
+	if from == "" {
+		from = startDate
+	}
+	if to == "" {
+		to = today
+	}
+	if from > to {
+		from, to = to, from
+	}
+	if to > today {
+		to = today
+	}
+	if from > today {
+		return "", "", fmt.Errorf("区间尚未开始")
+	}
+	return from, to, nil
+}
+
 // SyncIncremental 对已有 K 线且 lastDate < 今天的股票补到今天；无本地数据时提示先 Backfill。
 func (s *Syncer) SyncIncremental(ctx context.Context, progress func(done, total int, msg string)) (int, error) {
 	if s.Store == nil {
@@ -160,19 +235,36 @@ func (s *Syncer) dialAddr() string {
 	return baostock.DefaultAddr
 }
 
-func (s *Syncer) workerN() int {
-	n := defaultWorkers
-	if s.Workers > 0 {
-		n = s.Workers
+func ClampWorkers(n int) int {
+	if n < minWorkers {
+		return minWorkers
 	}
 	if n > maxWorkers {
-		n = maxWorkers
-	}
-	if n < 1 {
-		n = 1
+		return maxWorkers
 	}
 	return n
 }
+
+func MinWorkers() int { return minWorkers }
+func MaxWorkers() int { return maxWorkers }
+
+func (s *Syncer) SetWorkers(n int) int {
+	n = ClampWorkers(n)
+	s.workers.Store(int32(n))
+	return n
+}
+
+func (s *Syncer) WorkerCount() int {
+	if n := int(s.workers.Load()); n > 0 {
+		return ClampWorkers(n)
+	}
+	if s.Workers > 0 {
+		return ClampWorkers(s.Workers)
+	}
+	return defaultWorkers
+}
+
+func (s *Syncer) workerN() int { return s.WorkerCount() }
 
 func (s *Syncer) startDate() string {
 	if d := strings.TrimSpace(s.StartDate); d != "" {

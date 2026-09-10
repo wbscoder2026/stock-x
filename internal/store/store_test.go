@@ -101,4 +101,50 @@ func TestListLatestPicksEmptyDate(t *testing.T) {
 	if err != nil || len(got) != 1 || got[0].AsOf != "2024-01-03" {
 		t.Fatalf("range %+v %v", got, err)
 	}
+	got, err = s.ListPicksBySymbol("000001", "")
+	if err != nil || len(got) != 1 || got[0].Strategy != "s" {
+		t.Fatalf("symbol %+v %v", got, err)
+	}
+	got, err = s.ListPicksBySymbol("000002", "")
+	if err != nil || len(got) != 0 {
+		t.Fatalf("missing %+v %v", got, err)
+	}
+}
+
+func TestListKlineCoverage(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(filepath.Join(dir, "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	if err := s.UpsertStocks([]Stock{
+		{Symbol: "000001", Name: "平安", Market: "sz", Listed: true},
+		{Symbol: "600000", Name: "浦发", Market: "sh", Listed: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpsertBars([]Bar{
+		{Symbol: "000001", Date: "2024-01-02", Close: 10},
+		{Symbol: "000001", Date: "2024-03-01", Close: 11},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	list, total, err := s.ListKlineCoverage("", 0, 50)
+	if err != nil || total != 2 || len(list) != 2 {
+		t.Fatalf("list=%+v total=%d err=%v", list, total, err)
+	}
+	var ping KlineCoverage
+	for _, c := range list {
+		if c.Symbol == "000001" {
+			ping = c
+		}
+	}
+	if ping.StartDate != "2024-01-02" || ping.EndDate != "2024-03-01" || ping.Bars != 2 {
+		t.Fatalf("%+v", ping)
+	}
+	hit, total, err := s.ListKlineCoverage("浦发", 0, 10)
+	if err != nil || total != 1 || len(hit) != 1 || hit[0].Symbol != "600000" || hit[0].Bars != 0 {
+		t.Fatalf("q %+v total=%d err=%v", hit, total, err)
+	}
 }

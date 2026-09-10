@@ -39,6 +39,12 @@ type JobRun struct {
 	StartedAt, FinishedAt string
 }
 
+type KlineCoverage struct {
+	Symbol, Name, Market string
+	StartDate, EndDate   string
+	Bars                 int
+}
+
 type Store struct {
 	db *sql.DB
 }
@@ -56,7 +62,8 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(1)
+	db.SetMaxOpenConns(8)
+	db.SetMaxIdleConns(8)
 	if _, err := db.Exec(`PRAGMA busy_timeout = 15000; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;`); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -120,6 +127,7 @@ CREATE TABLE IF NOT EXISTS scan_pick (
 	name TEXT,
 	extra_json TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_scan_pick_symbol ON scan_pick(symbol);
 CREATE TABLE IF NOT EXISTS job_run (
 	id TEXT PRIMARY KEY,
 	type TEXT,
@@ -229,6 +237,59 @@ func (s *Store) LastDate(symbol string) (string, bool, error) {
 		return "", false, nil
 	}
 	return d.String, true, nil
+}
+
+func (s *Store) ListKlineCoverage(q string, offset, limit int) ([]KlineCoverage, int, error) {
+	if offset < 0 {
+		offset = 0
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	q = strings.TrimSpace(q)
+	where := `WHERE 1=1`
+	args := []any{}
+	if q != "" {
+		where += ` AND (s.symbol LIKE ? OR s.name LIKE ?)`
+		like := "%" + q + "%"
+		args = append(args, like, like)
+	}
+	var total int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM stock_info s `+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	listSQL := `SELECT s.symbol, s.name, s.market, MIN(d.date), MAX(d.date), COUNT(d.date)
+		FROM stock_info s
+		LEFT JOIN stock_daily d ON d.symbol = s.symbol
+		` + where + `
+		GROUP BY s.symbol, s.name, s.market
+		ORDER BY s.symbol
+		LIMIT ? OFFSET ?`
+	listArgs := append(append([]any{}, args...), limit, offset)
+	rows, err := s.db.Query(listSQL, listArgs...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	var out []KlineCoverage
+	for rows.Next() {
+		var c KlineCoverage
+		var start, end sql.NullString
+		if err := rows.Scan(&c.Symbol, &c.Name, &c.Market, &start, &end, &c.Bars); err != nil {
+			return nil, 0, err
+		}
+		if start.Valid {
+			c.StartDate = start.String
+		}
+		if end.Valid {
+			c.EndDate = end.String
+		}
+		out = append(out, c)
+	}
+	return out, total, rows.Err()
 }
 
 func (s *Store) LastDates() (map[string]string, error) {
@@ -472,6 +533,18 @@ func (s *Store) ListLatestPicks(strategy string) ([]ScanPick, error) {
 		args = append(args, strategy)
 	}
 	q += ` ORDER BY p.id`
+	return queryPicks(s, q, args)
+}
+
+// ListPicksBySymbol 某只股票全部成功扫描的选股。
+func (s *Store) ListPicksBySymbol(symbol, strategy string) ([]ScanPick, error) {
+	q := pickJoinSQL + ` AND p.symbol = ?`
+	args := []any{symbol}
+	if strings.TrimSpace(strategy) != "" {
+		q += ` AND p.strategy = ?`
+		args = append(args, strategy)
+	}
+	q += ` ORDER BY r.as_of, p.id`
 	return queryPicks(s, q, args)
 }
 

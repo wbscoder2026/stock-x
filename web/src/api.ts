@@ -1,4 +1,4 @@
-import type { ApiEnvelope, BacktestResult, Health, Job, KlineBar, PickRow, Schedule, StockHit, Strategy } from './types'
+import type { ApiEnvelope, BacktestResult, CoveragePage, Health, Job, KlineBar, PickRow, Schedule, StockHit, Strategy } from './types'
 
 async function parseEnvelope<T>(res: Response): Promise<T> {
   const text = await res.text()
@@ -70,12 +70,13 @@ export function parseExtra(extra: unknown): Record<string, unknown> {
 }
 
 export const fetchHealth = () => apiGet<Health>('/api/health')
-export const fetchPicks = (q?: { from?: string; to?: string; date?: string; strategy?: string }) => {
+export const fetchPicks = (q?: { from?: string; to?: string; date?: string; strategy?: string; symbol?: string }) => {
   const p = new URLSearchParams()
   if (q?.from) p.set('from', q.from)
   if (q?.to) p.set('to', q.to)
   if (q?.date) p.set('date', q.date)
   if (q?.strategy) p.set('strategy', q.strategy)
+  if (q?.symbol) p.set('symbol', q.symbol)
   const qs = p.toString()
   return apiGet<PickRow[]>(qs ? `/api/picks?${qs}` : '/api/picks')
 }
@@ -83,6 +84,14 @@ export const fetchStrategies = () => apiGet<Strategy[]>('/api/strategies')
 export const fetchStocks = (q: string) => apiGet<StockHit[]>(`/api/stocks?q=${encodeURIComponent(q)}`)
 export const fetchKline = (code: string) =>
   apiGet<KlineBar[]>(`/api/stocks/${encodeURIComponent(code)}/kline`)
+export const fetchKlineCoverage = (q?: { q?: string; offset?: number; limit?: number }) => {
+  const p = new URLSearchParams()
+  if (q?.q) p.set('q', q.q)
+  if (q?.offset != null) p.set('offset', String(q.offset))
+  if (q?.limit != null) p.set('limit', String(q.limit))
+  const qs = p.toString()
+  return apiGet<CoveragePage>(qs ? `/api/kline-coverage?${qs}` : '/api/kline-coverage')
+}
 export const fetchJobs = () => apiGet<Job[]>('/api/jobs')
 export const fetchJob = (id: string | number) => apiGet<Job>(`/api/jobs/${encodeURIComponent(String(id))}`)
 export const fetchSchedule = () => apiGet<Schedule | string>('/api/schedule')
@@ -94,12 +103,21 @@ export function putStrategy(
   return apiSend<Strategy>(`/api/strategies/${encodeURIComponent(String(id))}`, 'PUT', body)
 }
 
-export function postJob(type: string, extra?: { from?: string; to?: string }) {
+export function postJob(type: string, extra?: { from?: string; to?: string; symbols?: string[] }) {
   return apiSend<Job>('/api/jobs', 'POST', { type, ...extra })
 }
 
-export function pauseJob() {
-  return apiSend<{ status?: string }>('/api/jobs/pause', 'POST', {})
+export function pauseJob(type?: string) {
+  return apiSend<{ status?: string }>('/api/jobs/pause', 'POST', type ? { type } : {})
+}
+
+export function runningTypes(h?: Health): Set<string> {
+  const s = new Set<string>()
+  for (const j of h?.running_jobs ?? []) {
+    if (j.type) s.add(j.type)
+  }
+  if (h?.running?.type) s.add(h.running.type)
+  return s
 }
 
 export function resumeBackfill() {

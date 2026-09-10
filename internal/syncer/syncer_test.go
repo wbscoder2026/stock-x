@@ -44,6 +44,20 @@ func TestJobStartCaughtUp(t *testing.T) {
 	}
 }
 
+func TestClipRange(t *testing.T) {
+	from, to, err := clipRange("2024-06-01", "2024-01-01", "2024-12-31", "2024-01-01")
+	if err != nil || from != "2024-01-01" || to != "2024-06-01" {
+		t.Fatalf("%s %s %v", from, to, err)
+	}
+	from, to, err = clipRange("", "", "2024-06-01", "2024-01-01")
+	if err != nil || from != "2024-01-01" || to != "2024-06-01" {
+		t.Fatalf("empty %s %s %v", from, to, err)
+	}
+	if _, _, err := clipRange("2025-01-01", "2025-02-01", "2024-12-31", "2024-01-01"); err == nil {
+		t.Fatal("未来区间应失败")
+	}
+}
+
 func TestWorkerN(t *testing.T) {
 	if (&Syncer{}).workerN() != 4 {
 		t.Fatal("默认 4")
@@ -53,6 +67,16 @@ func TestWorkerN(t *testing.T) {
 	}
 	if (&Syncer{Workers: 99}).workerN() != 8 {
 		t.Fatal("上限 8")
+	}
+	s := &Syncer{Workers: 4}
+	if s.SetWorkers(99) != 8 || s.WorkerCount() != 8 {
+		t.Fatal("动态上限")
+	}
+	if s.SetWorkers(0) != 1 || s.WorkerCount() != 1 {
+		t.Fatal("动态下限")
+	}
+	if s.SetWorkers(3) != 3 || s.WorkerCount() != 3 {
+		t.Fatal("动态设置")
 	}
 }
 

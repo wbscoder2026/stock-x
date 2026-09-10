@@ -38,6 +38,20 @@ export type StockHit = {
   name?: string
 }
 
+export type KlineCoverage = {
+  symbol: string
+  name: string
+  market?: string
+  start_date?: string
+  end_date?: string
+  bars?: number
+}
+
+export type CoveragePage = {
+  total: number
+  items: KlineCoverage[]
+}
+
 export type Job = {
   id: string | number
   type?: string
@@ -56,13 +70,16 @@ export type Schedule = {
   cron?: string
 }
 
+export type RunningJob = { id?: string; type?: string; status?: string }
+
 export type Health = {
   status?: string
   version?: string
   stocks?: number
   bars?: number
   max_date?: string
-  running?: { id?: string; type?: string; status?: string }
+  running?: RunningJob
+  running_jobs?: RunningJob[]
 }
 
 export type BacktestResult = {

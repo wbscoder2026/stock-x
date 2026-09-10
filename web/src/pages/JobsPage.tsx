@@ -24,7 +24,7 @@ export default function JobsPage() {
   const { message } = App.useApp()
   const [rows, setRows] = useState<Job[]>([])
   const [loading, setLoading] = useState(false)
-  const [busy, setBusy] = useState<string>()
+  const [busy, setBusy] = useState<Record<string, boolean>>({})
   const [cron, setCron] = useState('')
   const [savingCron, setSavingCron] = useState(false)
 
@@ -55,7 +55,7 @@ export default function JobsPage() {
   }, [])
 
   async function run(type: string) {
-    setBusy(type)
+    setBusy((b) => ({ ...b, [type]: true }))
     try {
       const job = await postJob(type)
       const id = job?.id
@@ -71,7 +71,7 @@ export default function JobsPage() {
     } catch (e) {
       message.error(e instanceof Error ? e.message : '提交失败')
     } finally {
-      setBusy(undefined)
+      setBusy((b) => ({ ...b, [type]: false }))
     }
   }
 
@@ -86,7 +86,7 @@ export default function JobsPage() {
   }
 
   async function resumeNow() {
-    setBusy('resume')
+    setBusy((b) => ({ ...b, backfill: true }))
     try {
       const job = await resumeBackfill()
       const id = job?.id
@@ -102,7 +102,7 @@ export default function JobsPage() {
     } catch (e) {
       message.error(e instanceof Error ? e.message : '继续失败')
     } finally {
-      setBusy(undefined)
+      setBusy((b) => ({ ...b, backfill: false }))
     }
   }
 
@@ -125,19 +125,19 @@ export default function JobsPage() {
         <Typography.Title level={4} style={{ margin: 0 }}>
           任务
         </Typography.Title>
-        <Button type="primary" loading={busy === 'backfill'} disabled={!!busy} onClick={() => void run('backfill')}>
+        <Button type="primary" loading={!!busy.backfill} disabled={!!busy.backfill || !!busy.sync} onClick={() => void run('backfill')}>
           回填历史K线
         </Button>
         <Button danger onClick={() => void pauseNow()}>
           暂停
         </Button>
-        <Button loading={busy === 'resume'} disabled={!!busy} onClick={() => void resumeNow()}>
+        <Button loading={!!busy.backfill} disabled={!!busy.backfill} onClick={() => void resumeNow()}>
           继续回填
         </Button>
-        <Button loading={busy === 'sync'} disabled={!!busy} onClick={() => void run('sync')}>
+        <Button loading={!!busy.sync} disabled={!!busy.sync || !!busy.backfill} onClick={() => void run('sync')}>
           增量更新
         </Button>
-        <Button loading={busy === 'scan'} disabled={!!busy} onClick={() => void run('scan')}>
+        <Button loading={!!busy.scan} disabled={!!busy.scan} onClick={() => void run('scan')}>
           扫描最新交易日
         </Button>
         <Button onClick={() => void loadJobs()}>刷新</Button>
