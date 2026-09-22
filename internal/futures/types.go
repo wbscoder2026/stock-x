@@ -116,6 +116,8 @@ type Snapshot struct {
 	Resonance []string   `json:"resonance"`
 	Bars5     []KlineBar `json:"bars_5"`
 	Bars15    []KlineBar `json:"bars_15"`
+	// BarsPeriod 当前请求级别（非 5/15 分钟时）的 K 线，给前端画对应级别的图
+	BarsPeriod []KlineBar `json:"bars_period,omitempty"`
 }
 
 type Outcome struct {

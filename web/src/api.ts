@@ -3,10 +3,13 @@ import type {
   BacktestResult,
   CoveragePage,
   FuturesBacktestResult,
+  FuturesBlacklistEntry,
+  FuturesBlacklistScope,
   FuturesContract,
   FuturesParams,
   FuturesSnapshot,
   FuturesVariety,
+  FuturesWatchAlert,
   FuturesWatchConfig,
   FuturesWatchEvent,
   FuturesWatchStatus,
@@ -193,6 +196,25 @@ export function fetchFuturesWatchStatus() {
 
 export function fetchFuturesWatchEvents(since: number) {
   return apiGet<FuturesWatchEvent[]>(`/api/futures/watch/events?since=${since}`)
+}
+
+export function testFuturesWatchAlert(body: FuturesWatchAlert) {
+  return apiSend<{ note: string }>('/api/futures/watch/alert/test', 'POST', body)
+}
+
+export function fetchFuturesBlacklist() {
+  return apiGet<FuturesBlacklistEntry[]>('/api/futures/blacklist')
+}
+
+export function addFuturesBlacklist(body: { scope: FuturesBlacklistScope; value: string; note?: string }) {
+  return apiSend<{ scope: string; value: string }>('/api/futures/blacklist', 'POST', body)
+}
+
+export function removeFuturesBlacklist(scope: FuturesBlacklistScope, value: string) {
+  return apiSend<{ removed: number }>(
+    `/api/futures/blacklist?scope=${encodeURIComponent(scope)}&value=${encodeURIComponent(value)}`,
+    'DELETE',
+  )
 }
 
 export function scheduleCron(data: Schedule | string | null | undefined): string {

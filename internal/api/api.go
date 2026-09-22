@@ -3,6 +3,7 @@ package api
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -33,10 +34,173 @@ type Server struct {
 }
 
 func New(st *store.Store, jobs *job.Manager, sched *job.Scheduler, cfg config.Config, cronFn func()) *Server {
-	return &Server{
+	srv := &Server{
 		Store: st, Jobs: jobs, Sched: sched, Cfg: cfg, cronFn: cronFn,
 		Watch: futures.NewDefaultWatcher(),
 		Bars:  futuresync.NewStoredSource(st, futures.NewMultiSource(futures.DefaultSources()...)),
+	}
+	srv.Watch.OnEvents = srv.pushFuturesAlerts // 系统级提醒：飞书 / 本机通知
+	_ = srv.applyFuturesBlacklist()            // 重启后黑名单仍然生效
+	return srv
+}
+
+// normalizeBlacklistInput 校验并规整黑名单入参。
+func normalizeBlacklistInput(scope, value string) (string, string, error) {
+	scope = strings.ToLower(strings.TrimSpace(scope))
+	value = strings.ToUpper(strings.TrimSpace(value))
+	if value == "" {
+		return "", "", fmt.Errorf("缺少 value")
+	}
+	v, ok := futures.VarietyOfSymbol(value)
+	if !ok {
+		return "", "", fmt.Errorf("未知品种/合约 %s", value)
+	}
+	switch scope {
+	case store.BlacklistScopeVariety:
+		return scope, strings.ToUpper(v.Prefix), nil
+	case store.BlacklistScopeContract:
+		if strings.EqualFold(value, futures.MainSymbol(v)) {
+			return "", "", fmt.Errorf("%s 是主连代码，屏蔽整个品种请选「品种」", value)
+		}
+		return scope, value, nil
+	}
+	return "", "", fmt.Errorf("scope 只能是 variety（整个品种）或 contract（单个合约）")
+}
+
+// applyFuturesBlacklist 把库里的黑名单灌进监控器。
+func (s *Server) applyFuturesBlacklist() error {
+	entries, err := s.Store.ListFuturesBlacklist()
+	if err != nil {
+		return err
+	}
+	bl := futures.Blacklist{Varieties: map[string]bool{}, Contracts: map[string]bool{}}
+	for _, e := range entries {
+		switch e.Scope {
+		case store.BlacklistScopeVariety:
+			bl.Varieties[e.Value] = true
+		case store.BlacklistScopeContract:
+			bl.Contracts[e.Value] = true
+		}
+	}
+	s.Watch.SetBlacklist(bl)
+	return nil
+}
+
+func (s *Server) futuresBlacklistList(w http.ResponseWriter, _ *http.Request) {
+	list, err := s.Store.ListFuturesBlacklist()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeOK(w, list)
+}
+
+func (s *Server) futuresBlacklistAdd(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Scope string `json:"scope"`
+		Value string `json:"value"`
+		Note  string `json:"note"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "无效 JSON")
+		return
+	}
+	scope, value, err := normalizeBlacklistInput(body.Scope, body.Value)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.Store.AddFuturesBlacklist(scope, value, strings.TrimSpace(body.Note)); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := s.applyFuturesBlacklist(); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeOK(w, map[string]string{"scope": scope, "value": value})
+}
+
+func (s *Server) futuresBlacklistRemove(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	scope, value, err := normalizeBlacklistInput(q.Get("scope"), q.Get("value"))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	n, err := s.Store.RemoveFuturesBlacklist(scope, value)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := s.applyFuturesBlacklist(); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeOK(w, map[string]int{"removed": n})
+}
+
+// FuturesAlertMessage 组装突破提醒文案（标题 + 飞书 markdown 行）。
+func FuturesAlertMessage(events []futures.WatchEvent, limit int) (string, []string) {
+	if limit <= 0 {
+		limit = 12
+	}
+	title := "⚡ 期货突破 " + strconv.Itoa(len(events)) + " 条"
+	lines := make([]string, 0, limit+1)
+	for i, e := range events {
+		if i >= limit {
+			lines = append(lines, "…等共 "+strconv.Itoa(len(events))+" 条")
+			break
+		}
+		icon := "📈"
+		if strings.Contains(e.Direction, "向下") {
+			icon = "📉"
+		}
+		lines = append(lines, fmt.Sprintf("%s **%s %s** %s %s　现价 %.1f / 关键位 %.1f　%s",
+			icon, e.Name, e.Prefix, e.Direction, e.Level, e.Close, e.LevelPrice, e.Time))
+	}
+	return title, lines
+}
+
+// FuturesAlertSummary 一行短文案（系统通知正文，太长会被系统截断）。
+func FuturesAlertSummary(events []futures.WatchEvent, limit int) string {
+	if limit <= 0 {
+		limit = 3
+	}
+	parts := make([]string, 0, limit+1)
+	for i, e := range events {
+		if i >= limit {
+			parts = append(parts, fmt.Sprintf("等 %d 条", len(events)))
+			break
+		}
+		parts = append(parts, fmt.Sprintf("%s %s %.1f", e.Name, e.Direction, e.Close))
+	}
+	return strings.Join(parts, "；")
+}
+
+// pushFuturesAlerts 把「刚发生」的突破外发（离开浏览器也能收到）。
+func (s *Server) pushFuturesAlerts(cfg futures.WatchConfig, events []futures.WatchEvent) {
+	title, lines := FuturesAlertMessage(events, 12)
+	var notes []string
+
+	if cfg.Alert.Feishu {
+		if strings.TrimSpace(s.Cfg.FeishuWebhook) == "" {
+			notes = append(notes, "飞书未配置（需设 FEISHU_WEBHOOK_URL）")
+		} else if err := notify.SendCard(s.Cfg.FeishuWebhook, title, lines, "red"); err != nil {
+			notes = append(notes, "飞书推送失败："+err.Error())
+		} else {
+			notes = append(notes, fmt.Sprintf("飞书已推送 %d 条", len(events)))
+		}
+	}
+	if cfg.Alert.Desktop {
+		if err := notify.NotifyDesktop(title, FuturesAlertSummary(events, 3), "Glass"); err != nil {
+			notes = append(notes, "系统通知失败："+err.Error())
+		} else {
+			notes = append(notes, fmt.Sprintf("系统通知已弹 %d 条", len(events)))
+		}
+	}
+	if len(notes) > 0 {
+		s.Watch.SetAlertNote(strings.Join(notes, "；"))
 	}
 }
 
@@ -68,6 +232,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/futures/watch/stop", s.futuresWatchStop)
 	mux.HandleFunc("GET /api/futures/watch/status", s.futuresWatchStatus)
 	mux.HandleFunc("GET /api/futures/watch/events", s.futuresWatchEvents)
+	mux.HandleFunc("POST /api/futures/watch/alert/test", s.futuresWatchAlertTest)
+	mux.HandleFunc("GET /api/futures/blacklist", s.futuresBlacklistList)
+	mux.HandleFunc("POST /api/futures/blacklist", s.futuresBlacklistAdd)
+	mux.HandleFunc("DELETE /api/futures/blacklist", s.futuresBlacklistRemove)
 	mux.Handle("/", webembed.Handler())
 	return mux
 }
@@ -596,6 +764,28 @@ func (s *Server) futuresWatchStop(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) futuresWatchStatus(w http.ResponseWriter, _ *http.Request) {
 	writeOK(w, s.Watch.Status())
+}
+
+// futuresWatchAlertTest 让用户当场验证推送通道（不用等真实突破）。
+func (s *Server) futuresWatchAlertTest(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Feishu  bool `json:"feishu"`
+		Desktop bool `json:"desktop"`
+	}
+	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body)
+	if !body.Feishu && !body.Desktop {
+		writeErr(w, http.StatusBadRequest, "至少勾选一个通道")
+		return
+	}
+	events := []futures.WatchEvent{{
+		Fresh: true, Time: time.Now().In(futures.CSTZone()).Format("2006-01-02 15:04"),
+		Symbol: "JM0", Prefix: "JM", Name: "焦煤",
+		Direction: "向上突破", Level: "测试消息（非真实突破）",
+	}}
+	s.pushFuturesAlerts(futures.WatchConfig{Alert: futures.AlertConfig{
+		Feishu: body.Feishu, Desktop: body.Desktop,
+	}}, events)
+	writeOK(w, map[string]string{"note": s.Watch.Status().AlertNote})
 }
 
 func (s *Server) futuresWatchEvents(w http.ResponseWriter, r *http.Request) {

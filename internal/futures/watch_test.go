@@ -1,6 +1,7 @@
 package futures
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -254,6 +255,241 @@ func TestWatcherStartTickAndAlerts(t *testing.T) {
 	if stopped := w.Stop(); stopped.Running {
 		t.Fatal("Stop 后应停止")
 	}
+}
+
+func barsOf(rows []rawBar) []Bar {
+	bars, err := parseMinuteJSONP([]byte(minuteJSONP(rows)))
+	if err != nil {
+		panic(err)
+	}
+	return bars
+}
+
+func daysOf() []Daily {
+	days, err := parseDailyJSONP([]byte(dailyJSONP))
+	if err != nil {
+		panic(err)
+	}
+	return days
+}
+
+func TestWatcherAlertsOnlyFreshEvents(t *testing.T) {
+	quiet := barsOf(quietBars(11))
+	withBreak := barsOf(append(append([]rawBar{}, quietBars(11)...), breakoutBar(11)))
+	src := &fakeSource{name: "s", minute: quiet, daily: daysOf()}
+
+	w := NewWatcherSources(src)
+	got := make(chan []WatchEvent, 4)
+	var gotCfg WatchConfig
+	w.OnEvents = func(cfg WatchConfig, events []WatchEvent) {
+		gotCfg = cfg
+		got <- events
+	}
+	if _, err := w.Start(WatchConfig{
+		Params:   Params{Period: "5"},
+		Prefixes: []string{"JM"},
+		Interval: WatchMaxInterval,
+		Alert:    AlertConfig{Feishu: true, Desktop: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitTicks(t, w, 1)
+	select {
+	case evs := <-got:
+		t.Fatalf("横盘不该外发：%+v", evs)
+	default:
+	}
+
+	// 新 K 线上出现突破 → 外发一次，并带上开关配置
+	src.minute = withBreak
+	w.tick()
+	select {
+	case evs := <-got:
+		if len(evs) != 1 || !evs[0].Fresh || evs[0].Prefix != "JM" {
+			t.Fatalf("外发内容不对：%+v", evs)
+		}
+		if !gotCfg.Alert.Feishu || !gotCfg.Alert.Desktop {
+			t.Fatalf("配置没传给回调：%+v", gotCfg.Alert)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("突破没有触发外发回调")
+	}
+
+	// 同一根 K 线不重复外发
+	w.tick()
+	select {
+	case evs := <-got:
+		t.Fatalf("重复外发：%+v", evs)
+	default:
+	}
+
+	w.SetAlertNote("飞书已推送 1 条")
+	if note := w.Status().AlertNote; !strings.Contains(note, "飞书已推送") {
+		t.Fatalf("alert_note 没进状态：%s", note)
+	}
+	w.Stop()
+}
+
+type fakeResolver struct {
+	symbol, label string
+	calls         int32
+}
+
+func (f *fakeResolver) Resolve(_ context.Context, _ Variety) (string, string, error) {
+	atomic.AddInt32(&f.calls, 1)
+	return f.symbol, f.label, nil
+}
+
+func TestWatcherFillsMainContractAsync(t *testing.T) {
+	src := &fakeSource{
+		name:   "s",
+		minute: barsOf(append(append([]rawBar{}, quietBars(11)...), breakoutBar(11))),
+		daily:  daysOf(),
+	}
+	w := NewWatcherSources(src)
+	resolver := &fakeResolver{symbol: "JM2701", label: "2701"}
+	w.SetContractResolver(resolver)
+	if _, err := w.Start(WatchConfig{
+		Params: Params{Period: "5"}, Prefixes: []string{"JM"}, Interval: WatchMaxInterval,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitTicks(t, w, 1)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		events := w.Events(0)
+		if len(events) == 1 && events[0].Contract == "JM2701" && events[0].ContractLabel == "2701" {
+			if got := atomic.LoadInt32(&resolver.calls); got != 1 {
+				t.Fatalf("同一品种只该解析一次：%d", got)
+			}
+			w.Stop()
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("主力月份合约没回填：%+v", w.Events(0))
+}
+
+func TestWatcherWithoutResolverHasNoContract(t *testing.T) {
+	src := &fakeSource{
+		name:   "s",
+		minute: barsOf(append(append([]rawBar{}, quietBars(11)...), breakoutBar(11))),
+		daily:  daysOf(),
+	}
+	w := NewWatcherSources(src) // 不注入解析器
+	if _, err := w.Start(WatchConfig{
+		Params: Params{Period: "5"}, Prefixes: []string{"JM"}, Interval: WatchMaxInterval,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitTicks(t, w, 1)
+	if events := w.Events(0); len(events) != 1 || events[0].Contract != "" {
+		t.Fatalf("不该有月份：%+v", events)
+	}
+	w.Stop()
+}
+
+func breakoutBars() []Bar {
+	return barsOf(append(append([]rawBar{}, quietBars(11)...), breakoutBar(11)))
+}
+
+func TestFilterBlacklisted(t *testing.T) {
+	events := []Event{{
+		Time:      time.Date(2026, 9, 22, 9, 50, 0, 0, locCST),
+		Direction: DirUp, Level: "ORB高(开盘30分钟)", Close: 102, LevelPrice: 100,
+	}}
+	if got := filterBlacklisted(events, "JM", "JM2701", Blacklist{}); len(got) != 1 {
+		t.Fatal("空黑名单不该过滤")
+	}
+	byVariety := Blacklist{Varieties: map[string]bool{"JM": true}}
+	if got := filterBlacklisted(events, "JM", "JM2701", byVariety); got != nil {
+		t.Fatal("品种级黑名单应滤掉")
+	}
+	if got := filterBlacklisted(events, "RB", "RB2701", byVariety); len(got) != 1 {
+		t.Fatal("不该误伤其它品种")
+	}
+	byContract := Blacklist{Contracts: map[string]bool{"JM2701": true}}
+	if got := filterBlacklisted(events, "JM", "JM2701", byContract); got != nil {
+		t.Fatal("合约级黑名单应滤掉")
+	}
+	if got := filterBlacklisted(events, "JM", "JM2705", byContract); len(got) != 1 {
+		t.Fatal("换月到别的合约就该放行")
+	}
+	if got := filterBlacklisted(events, "JM", "", byContract); len(got) != 1 {
+		t.Fatal("主力合约还没解析出来时先放行")
+	}
+}
+
+func TestWatcherBlacklistSkipsVariety(t *testing.T) {
+	src := &fakeSource{name: "s", minute: breakoutBars(), daily: daysOf()}
+	w := NewWatcherSources(src)
+	w.SetBlacklist(Blacklist{Varieties: map[string]bool{"jm": true}}) // 小写也要命中
+
+	if _, err := w.Start(WatchConfig{
+		Params: Params{Period: "5"}, Prefixes: []string{"JM", "RB"}, Interval: WatchMaxInterval,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	st := waitTicks(t, w, 1)
+	if st.Varieties != 1 {
+		t.Fatalf("黑名单品种不该进扫描范围：%d", st.Varieties)
+	}
+	events := w.Events(0)
+	if len(events) == 0 {
+		t.Fatal("RB 应该有突破事件")
+	}
+	for _, e := range events {
+		if e.Prefix == "JM" {
+			t.Fatalf("黑名单品种不该有事件：%+v", e)
+		}
+	}
+	w.Stop()
+}
+
+func TestWatcherBlacklistSkipsResolvedContract(t *testing.T) {
+	src := &fakeSource{name: "s", minute: breakoutBars(), daily: daysOf()}
+	w := NewWatcherSources(src)
+	w.SetContractResolver(&fakeResolver{symbol: "JM2701", label: "2701"})
+	w.SetBlacklist(Blacklist{Contracts: map[string]bool{"JM2701": true}}) // 会先同步解析出主力合约
+
+	if _, err := w.Start(WatchConfig{
+		Params: Params{Period: "5"}, Prefixes: []string{"JM"}, Interval: WatchMaxInterval,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	st := waitTicks(t, w, 1)
+	if st.Varieties != 0 {
+		t.Fatalf("主力合约被拉黑的品种应移出扫描：%d", st.Varieties)
+	}
+	if events := w.Events(0); len(events) != 0 {
+		t.Fatalf("不该有事件：%+v", events)
+	}
+	w.Stop()
+}
+
+func TestSetBlacklistWhileRunningRebuilds(t *testing.T) {
+	src := &fakeSource{name: "s", minute: barsOf(quietBars(11)), daily: daysOf()}
+	w := NewWatcherSources(src)
+	if _, err := w.Start(WatchConfig{
+		Params: Params{Period: "5"}, Prefixes: []string{"JM", "RB"}, Interval: WatchMaxInterval,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if st := waitTicks(t, w, 1); st.Varieties != 2 {
+		t.Fatalf("起始应 2 个品种：%d", st.Varieties)
+	}
+
+	w.SetBlacklist(Blacklist{Varieties: map[string]bool{"JM": true}})
+	if st := w.Status(); st.Varieties != 1 {
+		t.Fatalf("拉黑后应只剩 1 个：%d", st.Varieties)
+	}
+	// 解除黑名单后能恢复（前端「移除」按钮依赖这个行为）
+	w.SetBlacklist(Blacklist{})
+	if st := w.Status(); st.Varieties != 2 {
+		t.Fatalf("解除后应恢复 2 个：%d", st.Varieties)
+	}
+	w.Stop()
 }
 
 func TestWatcherConfigHotUpdate(t *testing.T) {

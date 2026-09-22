@@ -49,6 +49,21 @@ go run ./cmd/stock-x futures-backfill   # 期货日线往前翻页挖历史
 | `POST /api/futures/watch/stop` | 停止 |
 | `GET /api/futures/watch/status` | 运行状态、覆盖品种数、每轮扫描/失败数/耗时、最近错误 |
 | `GET /api/futures/watch/events?since=N` | 增量提醒（`fresh=true` = 刚发生 → 前端弹窗） |
+| `POST /api/futures/watch/alert/test` | 当场验证提醒通道（body: `{"feishu":true,"desktop":true}`） |
+| `GET/POST/DELETE /api/futures/blacklist` | 监控黑名单：`scope=variety`（整个品种，如 JM）或 `contract`（单合约，如 JM2701） |
+
+**监控黑名单**：提醒列表每行有「加入黑名单」按钮 → 弹出模态框二选一（只屏蔽该合约 / 屏蔽整个品种的所有合约）+ 可选备注；命中的品种/合约**不再进入突破提醒列表**（单品种扫描、回测、`futures-sync` 都不受影响）。黑名单持久化在 SQLite（`futures_blacklist` 表），重启仍生效；卡片上的「黑名单(N)」按钮可查看/移除。品种级立即生效（直接从扫描范围剔除），合约级按「当前主力合约」判断——换月后自动放行。
+
+**提醒通道（离开浏览器也能收到）**：只有 `fresh=true`（刚发生）的突破才外发，同一根 K 线只发一次；通道可在页面上随时开关，也可用「测试提醒」按钮当场验证。
+
+| 通道 | 依赖 | 说明 |
+|---|---|---|
+| 站内弹窗 | 页面开着 | antd notification，不自动消失 |
+| 浏览器原生通知 | 页面/标签在后台 + 浏览器已授权 | 首次开启监控时申请权限 |
+| **飞书推送** | 服务端 `FEISHU_WEBHOOK_URL` | 服务端卡片推送，关掉浏览器也能收到；未配置时状态栏会提示 |
+| **桌面通知** | 服务端所在机器（macOS 通知中心 / Linux `notify-send`） | 带提示音，`osascript display notification`，不需要浏览器 |
+
+提醒列表会显示**主力月份合约**（如 `RB/2701`）；合约由新浪行情中心的持仓量异步解析（每个品种当天只查一次，不拖慢扫描）。**点任意一行** → 自动切到该月份合约 + 监控所在级别，加载价格图并画出关键位（`bars_period` 支持 5/15/30/60/120 各级别）。
 
 **数据源（多源容错，`internal/futures/source.go`）**：按顺序尝试，某个源失败就进冷却（30s→60s→120s→240s→封顶 5 分钟），后面的源顶上；页面显示「数据源 eastmoney（sina 冷却 60s）」。
 

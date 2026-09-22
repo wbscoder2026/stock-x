@@ -197,6 +197,12 @@ func ScanTimeframe(df []Bar, day time.Time, levels []Level, p Params) []Event {
 }
 
 func ScanBars(min5, min15 []Bar, daily []Daily, p Params) Snapshot {
+	return ScanBarsPeriod(min5, min15, nil, daily, p)
+}
+
+// ScanBarsPeriod 同 ScanBars，但额外带上「当前级别」（非 5/15 分钟）的 K 线，
+// 让前端能画与提醒同级别的价格图。
+func ScanBarsPeriod(min5, min15, periodBars []Bar, daily []Daily, p Params) Snapshot {
 	p = mergeParams(p)
 	day, upcoming, lastDay := determineDays(min5, daily)
 	base := PivotLevels(daily, day)
@@ -245,7 +251,7 @@ func ScanBars(min5, min15 []Bar, daily []Daily, p Params) Snapshot {
 		Trend: trend, Last5: toView(last5), Last15: toView(last15),
 		Levels: levels, VWAP: vwap, Position: pos,
 		Events5: toDTO(ev5), Events15: toDTO(ev15), Resonance: res,
-		Bars5: klineBars(min5), Bars15: klineBars(min15),
+		Bars5: klineBars(min5), Bars15: klineBars(min15), BarsPeriod: klineBars(periodBars),
 	}
 }
 

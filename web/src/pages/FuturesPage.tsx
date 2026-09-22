@@ -5,7 +5,10 @@ import {
   Button,
   Card,
   Form,
+  Input,
   InputNumber,
+  Modal,
+  Radio,
   Select,
   Space,
   Statistic,
@@ -36,13 +39,19 @@ import {
   fetchFuturesVarieties,
   fetchFuturesWatchEvents,
   fetchFuturesWatchStatus,
+  addFuturesBlacklist,
+  fetchFuturesBlacklist,
   postFuturesBacktest,
+  removeFuturesBlacklist,
   startFuturesWatch,
   stopFuturesWatch,
+  testFuturesWatchAlert,
   updateFuturesWatch,
 } from '../api'
 import type {
   FuturesBacktestResult,
+  FuturesBlacklistEntry,
+  FuturesBlacklistScope,
   FuturesContract,
   FuturesEvent,
   FuturesKlineBar,
@@ -205,13 +214,21 @@ const outcomeCols: ColumnsType<FuturesOutcome> = [
   { title: '判断', dataIndex: 'correct', render: (v: boolean) => (v ? '正确' : '错误') },
 ]
 
-const alertCols: ColumnsType<FuturesWatchEvent> = [
+const alertCols = (onBlacklist: (row: FuturesWatchEvent) => void): ColumnsType<FuturesWatchEvent> => [
   { title: '时间', dataIndex: 'time', width: 140 },
   {
     title: '品种',
     dataIndex: 'name',
     width: 100,
     render: (v: string, r) => `${v} ${r.prefix}`,
+  },
+  {
+    title: '合约',
+    dataIndex: 'contract_label',
+    width: 90,
+    render: (v: string, r) => (
+      <span title={r.contract || `${r.prefix}0（主连）`}>{v || '主连'}</span>
+    ),
   },
   {
     title: '方向',
@@ -228,6 +245,23 @@ const alertCols: ColumnsType<FuturesWatchEvent> = [
     dataIndex: 'fresh',
     width: 110,
     render: (v: boolean) => (v ? <Tag color="blue">实时</Tag> : <Tag>启动时已有</Tag>),
+  },
+  {
+    title: '操作',
+    key: 'ops',
+    width: 120,
+    render: (_, row) => (
+      <Button
+        size="small"
+        type="link"
+        onClick={(ev) => {
+          ev.stopPropagation() // 别触发「点行看图」
+          onBlacklist(row)
+        }}
+      >
+        加入黑名单
+      </Button>
+    ),
   },
 ]
 
@@ -325,14 +359,25 @@ export default function FuturesPage() {
   const [running, setRunning] = useState(false)
   const [snap, setSnap] = useState<FuturesSnapshot>()
   const [result, setResult] = useState<FuturesBacktestResult>()
+  const snapCardRef = useRef<HTMLDivElement>(null)
   const [watchPrefixes, setWatchPrefixes] = useState<string[]>([])
   const [watchInterval, setWatchInterval] = useState(30)
   const [watch, setWatch] = useState<FuturesWatchStatus>()
   const [alerts, setAlerts] = useState<FuturesWatchEvent[]>([])
   const [watchBusy, setWatchBusy] = useState(false)
+  const [alertFeishu, setAlertFeishu] = useState(false)
+  const [alertDesktop, setAlertDesktop] = useState(false)
+  const [testingAlert, setTestingAlert] = useState(false)
+  const [blacklist, setBlacklist] = useState<FuturesBlacklistEntry[]>([])
+  const [blacklistOpen, setBlacklistOpen] = useState(false)
+  const [blTarget, setBlTarget] = useState<FuturesWatchEvent>()
+  const [blScope, setBlScope] = useState<FuturesBlacklistScope>('contract')
+  const [blNote, setBlNote] = useState('')
+  const [blBusy, setBlBusy] = useState(false)
   const cursorRef = useRef(0)
   const runningRef = useRef(false)
   const firstPullRef = useRef(true)
+  const blacklistLoadedRef = useRef(false)
 
   useEffect(() => {
     void (async () => {
@@ -420,9 +465,114 @@ export default function FuturesPage() {
       vol_ratio: volRatio,
       interval: watchInterval,
       prefixes: watchPrefixes,
+      alert: { feishu: alertFeishu, desktop: alertDesktop },
     }),
-    [period, orb, donchian, atrPeriod, atrK, volRatio, watchInterval, watchPrefixes],
+    [period, orb, donchian, atrPeriod, atrK, volRatio, watchInterval, watchPrefixes, alertFeishu, alertDesktop],
   )
+
+  // 点提醒行 → 切到这个「月份合约 + 对应级别」并加载价格图（含关键位线）
+  async function openAlert(e: FuturesWatchEvent) {
+    const target = e.contract || `${e.prefix}0`
+    const monitorLevel = (watch?.config?.period as string) || period
+    setPrefix(e.prefix)
+    setSymbol(target)
+    if (['5', '15', '30', '60'].includes(monitorLevel)) setPeriod(monitorLevel)
+    setScanning(true)
+    try {
+      setSnap(
+        await fetchFuturesScan({
+          symbol: target,
+          period: monitorLevel,
+          orb,
+          donchian,
+          atr_period: atrPeriod,
+          atr_k: atrK,
+          vol_ratio: volRatio,
+          hold_bars: holdBars,
+        }),
+      )
+      message.success(`已加载 ${e.name} ${e.contract_label || '主连'} 价格图`)
+      // 等图表这一帧渲染完再滚过去（rAF 两帧 = 状态已提交）
+      requestAnimationFrame(() =>
+        requestAnimationFrame(() =>
+          snapCardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }),
+        ),
+      )
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : '加载价格图失败')
+    } finally {
+      setScanning(false)
+    }
+  }
+
+  const alertColumns = useMemo(() => alertCols(openBlacklistModal), [])
+
+  function openBlacklistModal(row: FuturesWatchEvent) {
+    setBlTarget(row)
+    setBlNote('')
+    setBlScope(row.contract ? 'contract' : 'variety') // 没解析出月份就只能按品种屏蔽
+  }
+
+  const reloadBlacklist = useCallback(async () => {
+    try {
+      setBlacklist(await fetchFuturesBlacklist())
+    } catch {
+      /* 列表拉取失败不打断页面 */
+    }
+  }, [])
+
+
+
+  async function submitBlacklist() {
+    const target = blTarget
+    if (!target) return
+    const value = blScope === 'contract' ? target.contract || '' : target.prefix
+    if (!value) {
+      message.error('该行还没解析出月份合约，请改用「屏蔽整个品种」')
+      return
+    }
+    setBlBusy(true)
+    try {
+      await addFuturesBlacklist({ scope: blScope, value, note: blNote })
+      await reloadBlacklist()
+      // 已提醒过的行直接从列表里拿掉（服务端也不再产生新提醒）
+      setAlerts((prev) =>
+        prev.filter((a) => (blScope === 'contract' ? a.contract !== value : a.prefix !== target.prefix)),
+      )
+      setBlTarget(undefined)
+      message.success(
+        blScope === 'contract'
+          ? `已加入黑名单：${value} 的突破不再提醒`
+          : `已加入黑名单：${target.name} ${target.prefix} 所有合约都不再提醒`,
+      )
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : '加入黑名单失败')
+    } finally {
+      setBlBusy(false)
+    }
+  }
+
+  async function removeBlacklist(entry: FuturesBlacklistEntry) {
+    try {
+      await removeFuturesBlacklist(entry.scope, entry.value)
+      await reloadBlacklist()
+      message.success(`已移除 ${entry.value}`)
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : '移除失败')
+    }
+  }
+
+  async function testAlert() {
+    setTestingAlert(true)
+    try {
+      const res = await testFuturesWatchAlert({ feishu: alertFeishu, desktop: alertDesktop })
+      message.info(res.note || '测试提醒已发出')
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : '测试提醒失败')
+    } finally {
+      setTestingAlert(false)
+    }
+  }
 
   const notifyBreakout = useCallback(
     (e: FuturesWatchEvent) => {
@@ -471,6 +621,10 @@ export default function FuturesPage() {
           }
         }
         firstPullRef.current = false
+        if (!blacklistLoadedRef.current) {
+          blacklistLoadedRef.current = true
+          void reloadBlacklist() // 首轮顺带把黑名单拉下来
+        }
       } catch {
         /* 轮询失败静默重试 */
       }
@@ -481,7 +635,7 @@ export default function FuturesPage() {
       cancelled = true
       window.clearInterval(timer)
     }
-  }, [notifyBreakout])
+  }, [notifyBreakout, reloadBlacklist])
 
   // 监控运行中改「级别 / ORB / Donchian / ATR / 量能 / 间隔 / 品种」→ 自动热更新（防抖 500ms）
   useEffect(() => {
@@ -639,6 +793,9 @@ export default function FuturesPage() {
               unCheckedChildren="已停止"
               onChange={(v) => void toggleWatch(v)}
             />
+            <Button size="small" onClick={() => setBlacklistOpen(true)}>
+              黑名单{blacklist.length ? `(${blacklist.length})` : ''}
+            </Button>
             <Button
               size="small"
               disabled={!alerts.length}
@@ -671,8 +828,23 @@ export default function FuturesPage() {
             onChange={setWatchPrefixes}
             options={varietyOpts}
           />
+          <Tooltip title="服务端推送到飞书群（需配 FEISHU_WEBHOOK_URL）；关掉浏览器也能收到">
+            <span className="param-label">
+              飞书推送
+              <Switch size="small" checked={alertFeishu} onChange={setAlertFeishu} />
+            </span>
+          </Tooltip>
+          <Tooltip title="服务端所在机器弹系统通知（macOS 通知中心 / Linux notify-send），带提示音；不依赖浏览器">
+            <span className="param-label">
+              桌面通知
+              <Switch size="small" checked={alertDesktop} onChange={setAlertDesktop} />
+            </span>
+          </Tooltip>
+          <Button size="small" loading={testingAlert} onClick={() => void testAlert()}>
+            测试提醒
+          </Button>
           <Typography.Text type="secondary">
-            运行中修改「级别 / ORB / Donchian / ATR / 量能」会自动生效
+            运行中修改「级别 / ORB / Donchian / ATR / 量能 / 提醒通道」会自动生效
           </Typography.Text>
         </Space>
         <Typography.Paragraph type="secondary" style={{ marginBottom: 8 }}>
@@ -682,19 +854,100 @@ export default function FuturesPage() {
           {coolingSources ? `（${coolingSources}）` : ''}
           {watch && watch.backoff > 1 ? ` · 限流退避 ×${watch.backoff}` : ''}
           {watch?.last_tick ? ` · 最后扫描 ${watch.last_tick}` : ''}
+          {watch?.alert_note ? ` · 提醒：${watch.alert_note}` : ''}
           {watch?.last_error ? ` · 最近错误：${watch.last_error}` : ''}
         </Typography.Paragraph>
         <Table
           size="small"
           rowKey={(r) => String(r.seq)}
-          columns={alertCols}
+          columns={alertColumns}
           dataSource={alerts}
           pagination={{ pageSize: 10, showSizeChanger: false }}
+          onRow={(r) => ({ onClick: () => void openAlert(r), style: { cursor: 'pointer' } })}
           locale={{ emptyText: watchRunning ? '监控中，暂未出现突破' : '未开启监控' }}
         />
+        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          点任意一行 → 跳到该月份合约对应级别的价格图（关键位会画在图上）；「加入黑名单」后该合约/品种不再进提醒列表
+        </Typography.Text>
       </Card>
 
+      <Modal
+        open={!!blTarget}
+        title="加入监控黑名单"
+        okText="加入黑名单"
+        cancelText="取消"
+        confirmLoading={blBusy}
+        onOk={() => void submitBlacklist()}
+        onCancel={() => setBlTarget(undefined)}
+        destroyOnHidden
+      >
+        {blTarget ? (
+          <>
+            <Typography.Paragraph type="secondary">
+              {blTarget.name} {blTarget.prefix}：加入后<b>不再出现在突破提醒列表</b>（单品种扫描、回测不受影响）
+            </Typography.Paragraph>
+            <Radio.Group value={blScope} onChange={(e) => setBlScope(e.target.value as FuturesBlacklistScope)}>
+              <Space direction="vertical" size={8}>
+                <Radio value="contract" disabled={!blTarget.contract}>
+                  只屏蔽该合约{' '}
+                  <Tag color={blTarget.contract ? 'blue' : 'default'}>
+                    {blTarget.contract || '未解析出月份，稍后可重试'}
+                  </Tag>
+                </Radio>
+                <Radio value="variety">
+                  屏蔽整个品种 <Tag color="orange">{blTarget.prefix}</Tag>
+                  <Typography.Text type="secondary">（所有月份合约都不提醒）</Typography.Text>
+                </Radio>
+              </Space>
+            </Radio.Group>
+            <Input
+              style={{ marginTop: 12 }}
+              placeholder="备注（可选，例如：日内波动太大）"
+              value={blNote}
+              onChange={(e) => setBlNote(e.target.value)}
+            />
+          </>
+        ) : null}
+      </Modal>
+
+      <Modal
+        open={blacklistOpen}
+        title={`监控黑名单（${blacklist.length}）`}
+        footer={null}
+        onCancel={() => setBlacklistOpen(false)}
+      >
+        <Table
+          size="small"
+          rowKey={(r) => `${r.scope}:${r.value}`}
+          dataSource={blacklist}
+          pagination={false}
+          locale={{ emptyText: '黑名单为空' }}
+          columns={[
+            {
+              title: '类型',
+              dataIndex: 'scope',
+              width: 90,
+              render: (v: FuturesBlacklistScope) =>
+                v === 'variety' ? <Tag color="orange">品种</Tag> : <Tag color="blue">合约</Tag>,
+            },
+            { title: '值', dataIndex: 'value', width: 120 },
+            { title: '备注', dataIndex: 'note' },
+            {
+              title: '操作',
+              key: 'ops',
+              width: 80,
+              render: (_, row) => (
+                <Button size="small" danger type="link" onClick={() => void removeBlacklist(row)}>
+                  移除
+                </Button>
+              ),
+            },
+          ]}
+        />
+      </Modal>
+
       {snap ? (
+        <div ref={snapCardRef}>
         <Card size="small" style={{ marginBottom: 16 }} title={`${snap.symbol} ${snap.day}${snap.upcoming ? ' 盘前' : ''} · 趋势 ${snap.trend}`}>
           <Typography.Paragraph>
             {snap.last_5 ? `5min ${snap.last_5.time} 收 ${snap.last_5.close} 量 ${snap.last_5.volume}` : ''}
@@ -705,7 +958,12 @@ export default function FuturesPage() {
             <Typography.Paragraph>多周期共振：{snap.resonance.join('，')}</Typography.Paragraph>
           ) : null}
           <FuturesChart
-            bars={(period === '5' ? snap.bars_5 : snap.bars_15) ?? snap.bars_15 ?? snap.bars_5 ?? []}
+            bars={
+              (period === '5' ? snap.bars_5 : period === '15' ? snap.bars_15 : snap.bars_period) ??
+              snap.bars_15 ??
+              snap.bars_5 ??
+              []
+            }
             events={(period === '5' ? snap.events_5 : snap.events_15) ?? []}
             levels={snap.levels}
           />
@@ -742,6 +1000,7 @@ export default function FuturesPage() {
             style={{ marginTop: 8 }}
           />
         </Card>
+        </div>
       ) : null}
 
       {result ? (

@@ -61,7 +61,32 @@ func TestWatcherLiveSmoke(t *testing.T) {
 	t.Logf("覆盖 %d 个品种，扫描 %d，失败 %d，耗时 %dms，提醒 %d 条",
 		st.Varieties, st.Scanned, st.Failures, st.LastMS, st.Events)
 	t.Logf("数据源：当前 %s，明细 %+v", st.Source, st.Sources)
-	for _, e := range w.Events(0) {
-		t.Logf("%s %s %s %s 现价 %.1f 关键位 %.1f", e.Time, e.Name, e.Direction, e.Level, e.Close, e.LevelPrice)
+	// 等主力月份合约异步补齐（事件里要能显示「2701」这种月份）
+	deadline = time.Now().Add(10 * time.Second)
+	var withContract int
+	for time.Now().Before(deadline) {
+		events := w.Events(0)
+		withContract = 0
+		for _, e := range events {
+			if e.Contract != "" {
+				withContract++
+			}
+		}
+		if len(events) == 0 || withContract > 0 {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
+	for _, e := range w.Events(0) {
+		t.Logf("%s %s %s%s %s %s 现价 %.1f 关键位 %.1f", e.Time, e.Name, e.Prefix,
+			contractText(e), e.Direction, e.Level, e.Close, e.LevelPrice)
+	}
+	t.Logf("带月份合约的事件：%d 条", withContract)
+}
+
+func contractText(e WatchEvent) string {
+	if e.ContractLabel != "" {
+		return "/" + e.ContractLabel
+	}
+	return ""
 }

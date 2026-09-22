@@ -103,6 +103,45 @@ var varieties = []Variety{
 
 var mainSymRe = regexp.MustCompile(`^[A-Za-z]+0$`)
 
+// ContractResolver 解析某品种当前的主力「月份合约」（JM → JM2701）。
+// 主连（JM0）只是连续价格，看图和下单都要落到具体月份合约上。
+type ContractResolver interface {
+	Resolve(ctx context.Context, v Variety) (symbol, label string, err error)
+}
+
+// SinaContracts 用新浪行情中心的持仓量挑主力月份合约（持仓最大者）。
+type SinaContracts struct {
+	Client *Client
+}
+
+func NewSinaContracts(c *Client) *SinaContracts {
+	if c == nil {
+		c = &Client{}
+	}
+	return &SinaContracts{Client: c}
+}
+
+// Resolve 返回主力月份合约代码与月份标签（如 JM2701 / 2701）；找不到则报错。
+func (s *SinaContracts) Resolve(ctx context.Context, v Variety) (string, string, error) {
+	list, err := s.Client.ContractsByPrefix(ctx, v.Prefix)
+	if err != nil {
+		return "", "", err
+	}
+	best := Contract{}
+	for _, c := range list {
+		if c.Kind == "main" || isMain(c.Symbol) || c.Symbol == "" {
+			continue // 跳过连续/主连代码
+		}
+		if best.Symbol == "" || c.Position > best.Position {
+			best = c
+		}
+	}
+	if best.Symbol == "" {
+		return "", "", fmt.Errorf("%s 没有月份合约", v.Prefix)
+	}
+	return best.Symbol, best.Label, nil
+}
+
 func ListVarieties() []Variety {
 	out := make([]Variety, len(varieties))
 	copy(out, varieties)

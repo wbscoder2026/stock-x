@@ -144,6 +144,7 @@ export type FuturesSnapshot = {
   resonance: string[]
   bars_5?: FuturesKlineBar[]
   bars_15?: FuturesKlineBar[]
+  bars_period?: FuturesKlineBar[]
 }
 
 export type FuturesParams = {
@@ -157,9 +158,24 @@ export type FuturesParams = {
   hold_bars?: number
 }
 
+export type FuturesWatchAlert = {
+  feishu?: boolean
+  desktop?: boolean
+}
+
+export type FuturesBlacklistScope = 'variety' | 'contract'
+
+export type FuturesBlacklistEntry = {
+  scope: FuturesBlacklistScope
+  value: string
+  note?: string
+  created_at?: string
+}
+
 export type FuturesWatchConfig = FuturesParams & {
   interval?: number
   prefixes?: string[]
+  alert?: FuturesWatchAlert
 }
 
 export type FuturesWatchEvent = {
@@ -170,6 +186,8 @@ export type FuturesWatchEvent = {
   symbol: string
   prefix: string
   name: string
+  contract?: string
+  contract_label?: string
   direction: string
   level: string
   close: number
@@ -201,6 +219,7 @@ export type FuturesWatchStatus = {
   events: number
   latest_seq: number
   backoff: number
+  alert_note?: string
 }
 
 export type FuturesOutcome = FuturesEvent & {

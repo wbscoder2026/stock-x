@@ -71,7 +71,14 @@ func (c *Client) Scan(ctx context.Context, p Params) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("日线: %w", err)
 	}
-	return ScanBars(min5, min15, daily, p), nil
+	// 非 5/15 分钟级别时，额外取一份当前级别的 K 线给前端画图（失败不致命）
+	var periodBars []Bar
+	if p.Period != "5" && p.Period != "15" {
+		if extra, err := c.Minute(ctx, p.Symbol, p.Period); err == nil {
+			periodBars = extra
+		}
+	}
+	return ScanBarsPeriod(min5, min15, periodBars, daily, p), nil
 }
 
 func (c *Client) Backtest(ctx context.Context, p Params) (Result, error) {
