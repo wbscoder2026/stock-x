@@ -88,6 +88,9 @@ func TestScanBreakoutUpAndVolumeFilter(t *testing.T) {
 			if e.Close != 112 {
 				t.Fatalf("close=%v", e.Close)
 			}
+			if e.ATR <= 0 { // 推荐止损/止盈要用它
+				t.Fatalf("事件应带上 ATR：%+v", e)
+			}
 		}
 	}
 	if !found {

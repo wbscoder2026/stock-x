@@ -117,6 +117,7 @@ func ScanTimeframe(df []Bar, day time.Time, levels []Level, p Params) []Event {
 				Time: df[j].Time, Direction: dir, Level: name,
 				Close: df[j].Close, Volume: int64(df[j].Volume),
 				LevelPrice: valAt(j),
+				ATR:        eventATR(atr[j]), // 供推荐止损/止盈用
 			})
 			return
 		}

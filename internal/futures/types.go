@@ -35,7 +35,15 @@ type Event struct {
 	Close      float64
 	Volume     int64
 	LevelPrice float64
+	ATR        float64 // 突破当根的 ATR（推荐止损/止盈用；数据不足时为 0）
 }
+
+// DefaultRR 默认盈亏比：止盈距离 = 止损距离 × RR。
+const DefaultRR = 1.5
+
+// DefaultStopATR 默认止损距离 = 该倍数 × ATR（1 = 一倍 ATR）。
+// 大周期（60 分钟）的 ATR 天然更大，想要更紧的止损可以调小这个倍数。
+const DefaultStopATR = 1.0
 
 type Params struct {
 	Symbol    string  `json:"symbol"`
@@ -46,6 +54,10 @@ type Params struct {
 	ATRK      float64 `json:"atr_k"`
 	VolRatio  float64 `json:"vol_ratio"`
 	HoldBars  int     `json:"hold_bars"`
+	StopATR   float64 `json:"stop_atr"` // 止损 = 入场 ∓ 该倍数 × ATR
+	// NoOvernight 日内策略：当日「日盘」收盘前必须平仓，不持隔夜（夜盘属次日交易时段，也不持有）。
+	NoOvernight bool    `json:"no_overnight"`
+	RR          float64 `json:"rr"`
 }
 
 func DefaultParams() Params {
@@ -53,6 +65,7 @@ func DefaultParams() Params {
 		Symbol: "JM0", Period: "5",
 		ORB: 30, Donchian: 20, ATRPeriod: 14,
 		ATRK: 0.25, VolRatio: 1.5, HoldBars: 6,
+		StopATR: DefaultStopATR, RR: DefaultRR,
 	}
 }
 
@@ -73,14 +86,22 @@ func mergeParams(p Params) Params {
 	if p.ATRPeriod <= 0 {
 		p.ATRPeriod = d.ATRPeriod
 	}
-	if p.ATRK <= 0 {
+	// 浮点参数都要防 NaN：NaN <= 0 为 false 会原样漏下去，
+	// 一旦进了价格，encoding/json 会拒绝编码 NaN → 整个响应 500。
+	if !finite(p.ATRK) || p.ATRK <= 0 {
 		p.ATRK = d.ATRK
 	}
-	if p.VolRatio <= 0 {
+	if !finite(p.VolRatio) || p.VolRatio <= 0 {
 		p.VolRatio = d.VolRatio
 	}
 	if p.HoldBars <= 0 {
 		p.HoldBars = d.HoldBars
+	}
+	if !finite(p.RR) || p.RR <= 0 {
+		p.RR = d.RR
+	}
+	if !finite(p.StopATR) || p.StopATR <= 0 {
+		p.StopATR = d.StopATR
 	}
 	return p
 }
@@ -129,8 +150,14 @@ type Outcome struct {
 	LevelPrice float64 `json:"level_price"`
 	ExitTime   string  `json:"exit_time"`
 	ExitPrice  float64 `json:"exit_price"`
-	Return     float64 `json:"return"`
+	Return     float64 `json:"return"` // 已按突破方向折算（做空跌了是正的）
 	Correct    bool    `json:"correct"`
+	ExitReason string  `json:"exit_reason"` // 止损 / 止盈 / 持有到期
+	StopPrice  float64 `json:"stop_price"`  // stopATR×ATR 止损（已按报价单位对齐；0 = ATR 不足）
+	TPPrice    float64 `json:"tp_price"`    // 止损距离×盈亏比 止盈
+	R          float64 `json:"r_multiple"`  // 以「止损距离」风险为 1R 的收益倍数
+	StopATR    float64 `json:"stop_atr"`    // 本次用的止损 ATR 倍数
+	TickSize   float64 `json:"tick_size"`   // 该品种最小变动价位（展示用）
 }
 
 type KlineBar struct {
@@ -143,12 +170,21 @@ type KlineBar struct {
 }
 
 type Result struct {
-	Symbol    string     `json:"symbol"`
-	Period    string     `json:"period"`
-	WinRate   float64    `json:"win_rate"`
-	AvgReturn float64    `json:"avg_return"`
-	Trades    int        `json:"trades"`
-	Correct   int        `json:"correct"`
-	Items     []Outcome  `json:"items"`
-	Bars      []KlineBar `json:"bars"`
+	Symbol       string     `json:"symbol"`
+	Period       string     `json:"period"`
+	WinRate      float64    `json:"win_rate"`
+	AvgReturn    float64    `json:"avg_return"`
+	AvgWin       float64    `json:"avg_win"`
+	AvgLoss      float64    `json:"avg_loss"`
+	ProfitFactor float64    `json:"profit_factor"` // 总盈利 / 总亏损；0 = 没有亏损单（前端显示「-」）
+	AvgR         float64    `json:"avg_r"`         // 期望 R
+	Trades       int        `json:"trades"`
+	Correct      int        `json:"correct"`
+	StopExits    int        `json:"stop_exits"`
+	TPExits      int        `json:"tp_exits"`
+	HoldExits    int        `json:"hold_exits"`
+	EODExits     int        `json:"eod_exits"`   // 日内收盘平仓（禁止隔夜时）
+	SkippedEOD   int        `json:"skipped_eod"` // 因禁止隔夜而不可交易、被跳过的信号数
+	Items        []Outcome  `json:"items"`
+	Bars         []KlineBar `json:"bars"`
 }

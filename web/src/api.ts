@@ -8,6 +8,8 @@ import type {
   FuturesContract,
   FuturesParams,
   FuturesSnapshot,
+  FuturesSweepRequest,
+  FuturesSweepResult,
   FuturesVariety,
   FuturesWatchAlert,
   FuturesWatchConfig,
@@ -158,6 +160,10 @@ export function postBacktest(body: { strategy: string; from: string; to: string;
 
 export function fetchFuturesVarieties() {
   return apiGet<FuturesVariety[]>('/api/futures/varieties')
+}
+
+export function postFuturesSweep(body: FuturesSweepRequest) {
+  return apiSend<FuturesSweepResult>('/api/futures/sweep', 'POST', body)
 }
 
 export function fetchFuturesContracts(prefix: string) {

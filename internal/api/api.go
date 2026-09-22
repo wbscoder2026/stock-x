@@ -156,8 +156,14 @@ func FuturesAlertMessage(events []futures.WatchEvent, limit int) (string, []stri
 		if strings.Contains(e.Direction, "向下") {
 			icon = "📉"
 		}
-		lines = append(lines, fmt.Sprintf("%s **%s %s** %s %s　现价 %.1f / 关键位 %.1f　%s",
-			icon, e.Name, e.Prefix, e.Direction, e.Level, e.Close, e.LevelPrice, e.Time))
+		advice := ""
+		if e.StopPrice > 0 && e.TPPrice > 0 {
+			advice = fmt.Sprintf("　推荐止损 %s / 止盈 %s（盈亏比 %.1f）",
+				futures.FormatPrice(e.StopPrice, e.TickSize),
+				futures.FormatPrice(e.TPPrice, e.TickSize), e.RR)
+		}
+		lines = append(lines, fmt.Sprintf("%s **%s %s** %s %s　现价 %.1f / 关键位 %.1f%s　%s",
+			icon, e.Name, e.Prefix, e.Direction, e.Level, e.Close, e.LevelPrice, advice, e.Time))
 	}
 	return title, lines
 }
@@ -227,6 +233,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/futures/contracts", s.futuresContracts)
 	mux.HandleFunc("GET /api/futures/scan", s.futuresScan)
 	mux.HandleFunc("POST /api/futures/backtest", s.futuresBacktest)
+	mux.HandleFunc("POST /api/futures/sweep", s.futuresSweep)
 	mux.HandleFunc("POST /api/futures/watch/start", s.futuresWatchStart)
 	mux.HandleFunc("POST /api/futures/watch/config", s.futuresWatchStart)
 	mux.HandleFunc("POST /api/futures/watch/stop", s.futuresWatchStop)
@@ -777,10 +784,14 @@ func (s *Server) futuresWatchAlertTest(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "至少勾选一个通道")
 		return
 	}
+	// 样例带上推荐价，让用户直接看到真实提醒的格式
+	stop, tp := futures.RecommendPrices("JM", "向上突破", 1523, 12, 1, futures.DefaultRR)
 	events := []futures.WatchEvent{{
 		Fresh: true, Time: time.Now().In(futures.CSTZone()).Format("2006-01-02 15:04"),
 		Symbol: "JM0", Prefix: "JM", Name: "焦煤",
 		Direction: "向上突破", Level: "测试消息（非真实突破）",
+		Close: 1523, LevelPrice: 1520,
+		StopPrice: stop, TPPrice: tp, RR: futures.DefaultRR,
 	}}
 	s.pushFuturesAlerts(futures.WatchConfig{Alert: futures.AlertConfig{
 		Feishu: body.Feishu, Desktop: body.Desktop,
@@ -806,6 +817,25 @@ func (s *Server) futuresBacktest(w http.ResponseWriter, r *http.Request) {
 	}
 	// 本地 SQLite 优先（futures-sync 灌过就有），缺数据才走多源网络并回写
 	res, err := futures.BacktestWithSource(r.Context(), s.Bars, p)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeOK(w, res)
+}
+
+// futuresSweep 参数扫描：多组候选值跑笛卡尔积，找最优组合（数据只取一次）。
+func (s *Server) futuresSweep(w http.ResponseWriter, r *http.Request) {
+	var req futures.SweepRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "无效 JSON")
+		return
+	}
+	if err := futures.ValidateSweep(req); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	res, err := futures.SweepWithSource(r.Context(), s.Bars, req)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, err.Error())
 		return

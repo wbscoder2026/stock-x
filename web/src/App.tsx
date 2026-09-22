@@ -6,7 +6,8 @@ import HistoryPage from './pages/HistoryPage'
 import StrategiesPage from './pages/StrategiesPage'
 import JobsPage from './pages/JobsPage'
 import BacktestPage from './pages/BacktestPage'
-import FuturesPage from './pages/FuturesPage'
+import FuturesBacktestPage from './pages/FuturesBacktestPage'
+import FuturesWatchPage from './pages/FuturesWatchPage'
 
 const items = [
   { key: '/picks', label: '选股' },
@@ -15,7 +16,8 @@ const items = [
   { key: '/strategies', label: '策略' },
   { key: '/jobs', label: '任务/回填' },
   { key: '/backtest', label: '回测' },
-  { key: '/futures', label: '期货' },
+  { key: '/futures/backtest', label: '期货回测' },
+  { key: '/futures/watch', label: '期货监控' },
 ]
 
 export default function App() {
@@ -51,7 +53,9 @@ export default function App() {
           <Route path="/strategies" element={<StrategiesPage />} />
           <Route path="/jobs" element={<JobsPage />} />
           <Route path="/backtest" element={<BacktestPage />} />
-          <Route path="/futures" element={<FuturesPage />} />
+          <Route path="/futures" element={<Navigate to="/futures/backtest" replace />} />
+          <Route path="/futures/backtest" element={<FuturesBacktestPage />} />
+          <Route path="/futures/watch" element={<FuturesWatchPage />} />
         </Routes>
       </Layout.Content>
     </Layout>

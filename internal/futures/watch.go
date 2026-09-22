@@ -3,6 +3,7 @@ package futures
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"sync"
 	"time"
@@ -107,6 +108,11 @@ type WatchEvent struct {
 	Close         float64 `json:"close"`
 	LevelPrice    float64 `json:"level_price"`
 	Volume        int64   `json:"volume"`
+	StopPrice     float64 `json:"stop_price"` // 推荐止损价（已对齐最小变动价位；0 = ATR 数据不足）
+	TPPrice       float64 `json:"tp_price"`   // 推荐止盈价（止损 stopATR×ATR，止盈 = 止损距离×RR）
+	RR            float64 `json:"rr"`         // 本次推荐用的盈亏比
+	StopATR       float64 `json:"stop_atr"`   // 本次推荐用的止损 ATR 倍数
+	TickSize      float64 `json:"tick_size"`  // 该品种最小变动价位（前端据此决定小数位）
 }
 
 // WatchStatus 监控状态
@@ -516,15 +522,86 @@ func watchKey(prefix string, e Event) string {
 	return fmt.Sprintf("%s|%d|%s|%s", prefix, e.Time.Unix(), e.Direction, e.Level)
 }
 
+// finite 是否是正常有限数（NaN / ±Inf 会让推荐价失去意义，甚至让 JSON 编码失败）。
+func finite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
+
+// effectiveRR 盈亏比：非法/未填 → 默认值。
+func effectiveRR(rr float64) float64 {
+	if !finite(rr) || rr <= 0 {
+		return DefaultRR
+	}
+	return rr
+}
+
+// effectiveStopATR 止损 ATR 倍数：非法/未填 → 默认值（0 会让止损贴到入场价上）。
+func effectiveStopATR(mult float64) float64 {
+	if !finite(mult) || mult <= 0 {
+		return DefaultStopATR
+	}
+	return mult
+}
+
+// eventATR 有效 ATR：缺失或非正 → 0（表示没有足够数据给推荐价）。
+func eventATR(v float64) float64 {
+	if !finite(v) || v <= 0 {
+		return 0
+	}
+	return v
+}
+
+// RecommendPrices 推荐止损/止盈价：止损 = 现价 ∓ stopATR×ATR，止盈 = 现价 ± stopATR×ATR×盈亏比。
+// 结果按该品种最小变动价位对齐（挂得出去的价格），并保证两个价至少离入场价 1 个跳。
+// ATR 或价格无效时返回 0,0（前端显示「-」）。
+func RecommendPrices(prefix, direction string, entry, atr, stopATR, rr float64) (stop, tp float64) {
+	atr = eventATR(atr)
+	if atr <= 0 || !finite(entry) || entry <= 0 {
+		return 0, 0
+	}
+	risk := atr * effectiveStopATR(stopATR) // 止损距离
+	take := risk * effectiveRR(rr)          // 止盈距离 = 止损距离 × 盈亏比
+	tick := TickSize(prefix)
+	base := RoundToTick(entry, tick)
+	down := direction == DirDown
+
+	rawStop, rawTake := entry-risk, entry+take
+	if down { // 向下突破：跌了止损、涨了止盈
+		rawStop, rawTake = entry+risk, entry-take
+	}
+	stop = RoundToTick(rawStop, tick)
+	tp = RoundToTick(rawTake, tick)
+
+	// ATR 比一个跳还小时，取整会把价格压到入场价上（等于没有止损）→ 保底各留 1 个跳
+	if down {
+		if stop < base+tick {
+			stop = base + tick
+		}
+		if tp > base-tick {
+			tp = base - tick
+		}
+	} else {
+		if stop > base-tick {
+			stop = base - tick
+		}
+		if tp < base+tick {
+			tp = base + tick
+		}
+	}
+	return stop, tp
+}
+
 // collectNew 过滤出没见过的事件；fresh = 事件落在上一轮最后 K 线之后（刚发生的）。
-func collectNew(seen map[string]int64, evs []Event, prevLastBar time.Time, day string, v Variety) []WatchEvent {
+// stopATR / rr 决定推荐止损（倍数×ATR）与止盈（止损距离×盈亏比）。
+func collectNew(seen map[string]int64, evs []Event, prevLastBar time.Time, day string, v Variety, stopATR, rr float64) []WatchEvent {
 	out := make([]WatchEvent, 0, len(evs))
+	rr = effectiveRR(rr)
+	stopATR = effectiveStopATR(stopATR)
 	for _, e := range evs {
 		key := watchKey(v.Prefix, e)
 		if _, ok := seen[key]; ok {
 			continue
 		}
 		seen[key] = e.Time.Unix()
+		stop, tp := RecommendPrices(v.Prefix, e.Direction, e.Close, e.ATR, stopATR, rr)
 		out = append(out, WatchEvent{
 			Fresh:      !prevLastBar.IsZero() && e.Time.After(prevLastBar),
 			Day:        day,
@@ -538,6 +615,11 @@ func collectNew(seen map[string]int64, evs []Event, prevLastBar time.Time, day s
 			Close:      e.Close,
 			LevelPrice: e.LevelPrice,
 			Volume:     e.Volume,
+			StopPrice:  stop,
+			TPPrice:    tp,
+			RR:         rr,
+			StopATR:    stopATR,
+			TickSize:   TickSize(v.Prefix),
 		})
 	}
 	return out
@@ -598,7 +680,7 @@ func (t *Watcher) Status() WatchStatus {
 func (t *Watcher) Events(since int64) []WatchEvent {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.pruneExpiredLocked(time.Now())
+	t.pruneExpiredLocked(t.now())
 	out := make([]WatchEvent, 0, len(t.events))
 	for _, e := range t.events {
 		if e.Seq > since {
@@ -628,7 +710,7 @@ func (t *Watcher) pruneExpiredLocked(now time.Time) {
 }
 
 func (t *Watcher) statusLocked() WatchStatus {
-	t.pruneExpiredLocked(time.Now()) // 状态里的条数也按时效算
+	t.pruneExpiredLocked(t.now()) // 状态里的条数也按时效算
 	st := WatchStatus{
 		Running:     t.running,
 		AlertTTLSec: int(AlertTTL / time.Second),
@@ -742,7 +824,7 @@ func (t *Watcher) tick() {
 		day := truncateDate(oc.lastBar).Format("2006-01-02")
 		prev := t.lastBar[oc.v.Prefix]
 		events := filterBlacklisted(oc.events, oc.v.Prefix, t.contractCache[oc.v.Prefix].symbol, t.blacklist)
-		fresh := collectNew(t.seen, events, prev, day, oc.v)
+		fresh := collectNew(t.seen, events, prev, day, oc.v, t.cfg.Params.StopATR, t.cfg.Params.RR)
 		for i := range fresh {
 			t.seq++
 			fresh[i].Seq = t.seq
@@ -757,7 +839,7 @@ func (t *Watcher) tick() {
 		t.events = append(t.events, fresh...)
 		t.lastBar[oc.v.Prefix] = oc.lastBar
 	}
-	t.pruneExpiredLocked(time.Now()) // 本轮结束后清掉过期提醒
+	t.pruneExpiredLocked(t.now()) // 本轮结束后清掉过期提醒
 
 	t.ticks++
 	t.lastTick = t.now()
@@ -810,6 +892,11 @@ func (t *Watcher) fetchOne(cfg WatchConfig, v Variety) watchOutcome {
 		return oc
 	}
 	if len(bars) == 0 || len(daily) == 0 {
+		return oc
+	}
+	// 分钟线与日线价差异常 → 本轮跳过该品种（脏数据会让 ATR/关键位全失真）
+	if err := checkMinuteDailyAgree(v.Prefix, bars, daily); err != nil {
+		oc.err = err
 		return oc
 	}
 	oc.lastBar = lastBarTime(bars)

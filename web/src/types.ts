@@ -156,6 +156,9 @@ export type FuturesParams = {
   atr_k?: number
   vol_ratio?: number
   hold_bars?: number
+  stop_atr?: number
+  no_overnight?: boolean
+  rr?: number
 }
 
 export type FuturesWatchAlert = {
@@ -183,6 +186,7 @@ export type FuturesWatchEvent = {
   fresh: boolean
   day: string
   time: string
+  time_ms: number
   symbol: string
   prefix: string
   name: string
@@ -193,6 +197,11 @@ export type FuturesWatchEvent = {
   close: number
   level_price: number
   volume: number
+  stop_price: number
+  tp_price: number
+  rr: number
+  stop_atr: number
+  tick_size: number
 }
 
 export type FuturesWatchSource = {
@@ -217,6 +226,7 @@ export type FuturesWatchStatus = {
   last_error: string
   last_ms: number
   events: number
+  alert_ttl_sec?: number
   latest_seq: number
   backoff: number
   alert_note?: string
@@ -227,6 +237,61 @@ export type FuturesOutcome = FuturesEvent & {
   exit_price: number
   return: number
   correct: boolean
+  exit_reason: string
+  stop_price: number
+  tp_price: number
+  r_multiple: number
+  stop_atr: number
+  tick_size: number
+}
+
+// 参数扫描（网格搜索）
+export type FuturesSweepRequest = {
+  symbol?: string
+  period?: string
+  periods?: string[]
+  orb?: number[]
+  donchian?: number[]
+  atr_period?: number[]
+  atr_k?: number[]
+  vol_ratio?: number[]
+  hold_bars?: number[]
+  stop_atr?: number[]
+  no_overnight?: number[]
+  rr?: number[]
+  objective?: FuturesSweepObjective
+  min_trades?: number
+  limit?: number
+  workers?: number
+}
+
+export type FuturesSweepObjective = 'win_rate' | 'avg_return' | 'avg_r' | 'profit_factor'
+
+export type FuturesSweepRow = {
+  params: FuturesParams
+  trades: number
+  win_rate: number
+  avg_return: number
+  avg_r: number
+  profit_factor: number
+  stop_exits: number
+  tp_exits: number
+  hold_exits: number
+  reliable: boolean
+}
+
+export type FuturesSweepResult = {
+  symbol: string
+  periods: string[]
+  objective: FuturesSweepObjective
+  min_trades: number
+  combos: number
+  workers: number
+  best?: FuturesSweepRow
+  rows: FuturesSweepRow[]
+  skipped?: string[]
+  period_bars?: Record<string, number>
+  elapsed_ms: number
 }
 
 export type FuturesBacktestResult = {
@@ -234,8 +299,17 @@ export type FuturesBacktestResult = {
   period: string
   win_rate: number
   avg_return: number
+  avg_win?: number
+  avg_loss?: number
+  profit_factor?: number
+  avg_r?: number
   trades: number
   correct: number
+  stop_exits?: number
+  tp_exits?: number
+  hold_exits?: number
+  eod_exits?: number
+  skipped_eod?: number
   items: FuturesOutcome[]
   bars?: FuturesKlineBar[]
 }

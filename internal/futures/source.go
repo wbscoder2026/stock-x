@@ -204,26 +204,50 @@ func fetch[T any](m *MultiSource, v Variety, call func(BarSource) ([]T, error)) 
 
 func (m *MultiSource) Minute(ctx context.Context, v Variety, period string) ([]Bar, error) {
 	return fetch(m, v, func(src BarSource) ([]Bar, error) {
-		return src.Minute(ctx, v, period)
+		bars, err := src.Minute(ctx, v, period)
+		if err != nil {
+			return nil, err
+		}
+		// 脏数据（价格量级混叠）也算失败 → 自动降级到下一个源
+		if err := checkBarScale(v.Prefix, barCloses(bars)); err != nil {
+			return nil, err
+		}
+		return bars, nil
 	})
 }
 
 func (m *MultiSource) Daily(ctx context.Context, v Variety) ([]Daily, error) {
 	return fetch(m, v, func(src BarSource) ([]Daily, error) {
-		return src.Daily(ctx, v)
+		days, err := src.Daily(ctx, v)
+		if err != nil {
+			return nil, err
+		}
+		if err := checkBarScale(v.Prefix, dailyCloses(days)); err != nil {
+			return nil, err
+		}
+		return days, nil
 	})
 }
 
 // DailyRange 日线翻页（挖历史）：优先用支持翻页的源；end 为零值时也允许普通源兜底。
 func (m *MultiSource) DailyRange(ctx context.Context, v Variety, end time.Time, limit int) ([]Daily, error) {
 	return fetch(m, v, func(src BarSource) ([]Daily, error) {
+		var days []Daily
+		var err error
 		if rs, ok := src.(RangeSource); ok {
-			return rs.DailyRange(ctx, v, end, limit)
-		}
-		if !end.IsZero() {
+			days, err = rs.DailyRange(ctx, v, end, limit)
+		} else if !end.IsZero() {
 			return nil, errSourceNotApplicable
+		} else {
+			days, err = src.Daily(ctx, v)
 		}
-		return src.Daily(ctx, v)
+		if err != nil {
+			return nil, err
+		}
+		if err := checkBarScale(v.Prefix, dailyCloses(days)); err != nil {
+			return nil, err
+		}
+		return days, nil
 	})
 }
 
