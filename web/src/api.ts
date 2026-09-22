@@ -1,4 +1,25 @@
-import type { ApiEnvelope, BacktestResult, CoveragePage, Health, Job, KlineBar, PickRow, Schedule, StockHit, Strategy } from './types'
+import type {
+  ApiEnvelope,
+  BacktestResult,
+  CoveragePage,
+  FuturesBacktestResult,
+  FuturesContract,
+  FuturesParams,
+  FuturesSnapshot,
+  FuturesVariety,
+  FuturesWatchConfig,
+  FuturesWatchEvent,
+  FuturesWatchStatus,
+  Health,
+  Job,
+  KlineBar,
+  PickRow,
+  Schedule,
+  StockHit,
+  Strategy,
+} from './types'
+
+export type { FuturesParams }
 
 async function parseEnvelope<T>(res: Response): Promise<T> {
   const text = await res.text()
@@ -130,6 +151,48 @@ export function putSchedule(cron: string) {
 
 export function postBacktest(body: { strategy: string; from: string; to: string; holdDays: number }) {
   return apiSend<BacktestResult>('/api/backtest', 'POST', body)
+}
+
+export function fetchFuturesVarieties() {
+  return apiGet<FuturesVariety[]>('/api/futures/varieties')
+}
+
+export function fetchFuturesContracts(prefix: string) {
+  return apiGet<FuturesContract[]>(`/api/futures/contracts?prefix=${encodeURIComponent(prefix)}`)
+}
+
+export function fetchFuturesScan(p: FuturesParams) {
+  const q = new URLSearchParams()
+  for (const [k, v] of Object.entries(p)) {
+    if (v == null || v === '') continue
+    q.set(k, String(v))
+  }
+  const qs = q.toString()
+  return apiGet<FuturesSnapshot>(qs ? `/api/futures/scan?${qs}` : '/api/futures/scan')
+}
+
+export function postFuturesBacktest(body: FuturesParams) {
+  return apiSend<FuturesBacktestResult>('/api/futures/backtest', 'POST', body)
+}
+
+export function startFuturesWatch(cfg: FuturesWatchConfig) {
+  return apiSend<FuturesWatchStatus>('/api/futures/watch/start', 'POST', cfg)
+}
+
+export function updateFuturesWatch(cfg: FuturesWatchConfig) {
+  return apiSend<FuturesWatchStatus>('/api/futures/watch/config', 'POST', cfg)
+}
+
+export function stopFuturesWatch() {
+  return apiSend<FuturesWatchStatus>('/api/futures/watch/stop', 'POST', {})
+}
+
+export function fetchFuturesWatchStatus() {
+  return apiGet<FuturesWatchStatus>('/api/futures/watch/status')
+}
+
+export function fetchFuturesWatchEvents(since: number) {
+  return apiGet<FuturesWatchEvent[]>(`/api/futures/watch/events?since=${since}`)
 }
 
 export function scheduleCron(data: Schedule | string | null | undefined): string {

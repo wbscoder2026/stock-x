@@ -1,0 +1,6 @@
+tqsdk>=3.0
+pandas>=1.5
+numpy>=1.21
+
+# 单测（`python3 -m pytest scripts/tq_relay_scan/ -q`）
+pytest>=7.0

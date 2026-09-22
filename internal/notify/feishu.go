@@ -54,6 +54,71 @@ func ToXueqiu(symbol string) string {
 	}
 }
 
+// SendCard 向飞书 webhook 推送通用 interactive 卡片（标题 + 若干 lark_md 行）。
+// webhook 为空则直接成功（视为未配置）。template 为空时用 blue。
+func SendCard(webhook, title string, lines []string, template string) error {
+	webhook = strings.TrimSpace(webhook)
+	if webhook == "" {
+		return nil
+	}
+	if template == "" {
+		template = "blue"
+	}
+	content := strings.Join(lines, "\n")
+	if content == "" {
+		content = "（无内容）"
+	}
+	payload := map[string]any{
+		"msg_type": "interactive",
+		"card": map[string]any{
+			"header": map[string]any{
+				"title":    map[string]any{"tag": "plain_text", "content": title},
+				"template": template,
+			},
+			"elements": []any{
+				map[string]any{
+					"tag":  "div",
+					"text": map[string]any{"tag": "lark_md", "content": content},
+				},
+			},
+		},
+	}
+	return postJSON(webhook, payload)
+}
+
+func postJSON(endpoint string, payload any) error {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("飞书 HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	var parsed struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return fmt.Errorf("飞书响应非 JSON: %s", strings.TrimSpace(string(raw)))
+	}
+	if parsed.Code != 0 {
+		return fmt.Errorf("飞书失败 code=%d msg=%s", parsed.Code, parsed.Msg)
+	}
+	return nil
+}
+
 // Send 向飞书 webhook 推送 interactive 卡片。webhook 为空则直接成功。
 func Send(webhook, strategyName string, picks []struct{ Symbol, Name string }) error {
 	webhook = strings.TrimSpace(webhook)

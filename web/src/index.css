@@ -19,6 +19,11 @@ body {
   width: 100%;
 }
 
+.futures-chart {
+  height: 420px;
+  width: 100%;
+}
+
 .job-log {
   max-height: 360px;
   overflow: auto;
@@ -29,4 +34,42 @@ body {
   padding: 12px;
   border-radius: 6px;
   white-space: pre-wrap;
+}
+
+.param-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.param-help {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border: 1px solid #bfbfbf;
+  border-radius: 50%;
+  color: #8c8c8c;
+  font-size: 10px;
+  line-height: 1;
+  cursor: help;
+  user-select: none;
+}
+
+.param-help:hover {
+  color: #1677ff;
+  border-color: #1677ff;
+}
+
+.param-tip {
+  max-width: 320px;
+  line-height: 1.6;
+}
+
+.param-tip code {
+  color: inherit;
+  background: rgba(255, 255, 255, 0.14);
+  padding: 0 3px;
+  border-radius: 3px;
 }

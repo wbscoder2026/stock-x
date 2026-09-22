@@ -82,6 +82,145 @@ export type Health = {
   running_jobs?: RunningJob[]
 }
 
+export type FuturesVariety = {
+  name: string
+  prefix: string
+  exchange: string
+}
+
+export type FuturesContract = {
+  symbol: string
+  name: string
+  label: string
+  variety: string
+  exchange: string
+  kind: string
+  position?: number
+}
+
+export type FuturesLevel = {
+  name: string
+  kind: string
+  value: number
+}
+
+export type FuturesBarView = {
+  time: string
+  close: number
+  volume: number
+  hold: number
+}
+
+export type FuturesEvent = {
+  time: string
+  direction: string
+  level: string
+  close: number
+  volume: number
+  level_price: number
+}
+
+export type FuturesKlineBar = {
+  time: string
+  open: number
+  high: number
+  low: number
+  close: number
+  volume: number
+}
+
+export type FuturesSnapshot = {
+  symbol: string
+  day: string
+  upcoming: boolean
+  trend: string
+  last_5?: FuturesBarView
+  last_15?: FuturesBarView
+  levels: FuturesLevel[]
+  vwap?: number
+  position: string
+  events_5: FuturesEvent[]
+  events_15: FuturesEvent[]
+  resonance: string[]
+  bars_5?: FuturesKlineBar[]
+  bars_15?: FuturesKlineBar[]
+}
+
+export type FuturesParams = {
+  symbol?: string
+  period?: string
+  orb?: number
+  donchian?: number
+  atr_period?: number
+  atr_k?: number
+  vol_ratio?: number
+  hold_bars?: number
+}
+
+export type FuturesWatchConfig = FuturesParams & {
+  interval?: number
+  prefixes?: string[]
+}
+
+export type FuturesWatchEvent = {
+  seq: number
+  fresh: boolean
+  day: string
+  time: string
+  symbol: string
+  prefix: string
+  name: string
+  direction: string
+  level: string
+  close: number
+  level_price: number
+  volume: number
+}
+
+export type FuturesWatchSource = {
+  name: string
+  calls: number
+  ok: number
+  fails: number
+  cooldown: number
+}
+
+export type FuturesWatchStatus = {
+  running: boolean
+  config: FuturesWatchConfig
+  source?: string
+  sources?: FuturesWatchSource[]
+  varieties: number
+  started_at: string
+  last_tick: string
+  ticks: number
+  scanned: number
+  failures: number
+  last_error: string
+  last_ms: number
+  events: number
+  latest_seq: number
+  backoff: number
+}
+
+export type FuturesOutcome = FuturesEvent & {
+  exit_time: string
+  exit_price: number
+  return: number
+  correct: boolean
+}
+
+export type FuturesBacktestResult = {
+  symbol: string
+  period: string
+  win_rate: number
+  avg_return: number
+  trades: number
+  correct: number
+  items: FuturesOutcome[]
+  bars?: FuturesKlineBar[]
+}
+
 export type BacktestResult = {
   winRate?: number
   win_rate?: number

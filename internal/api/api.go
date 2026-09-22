@@ -11,6 +11,8 @@ import (
 
 	"github.com/wbscoder2026/stock-x/internal/backtest"
 	"github.com/wbscoder2026/stock-x/internal/config"
+	"github.com/wbscoder2026/stock-x/internal/futures"
+	"github.com/wbscoder2026/stock-x/internal/futuresync"
 	"github.com/wbscoder2026/stock-x/internal/job"
 	"github.com/wbscoder2026/stock-x/internal/notify"
 	"github.com/wbscoder2026/stock-x/internal/store"
@@ -25,11 +27,17 @@ type Server struct {
 	Jobs   *job.Manager
 	Sched  *job.Scheduler
 	Cfg    config.Config
+	Watch  *futures.Watcher
+	Bars   *futuresync.StoredSource // 回测/研究用：本地优先，缺数据走网络并回写
 	cronFn func()
 }
 
 func New(st *store.Store, jobs *job.Manager, sched *job.Scheduler, cfg config.Config, cronFn func()) *Server {
-	return &Server{Store: st, Jobs: jobs, Sched: sched, Cfg: cfg, cronFn: cronFn}
+	return &Server{
+		Store: st, Jobs: jobs, Sched: sched, Cfg: cfg, cronFn: cronFn,
+		Watch: futures.NewDefaultWatcher(),
+		Bars:  futuresync.NewStoredSource(st, futures.NewMultiSource(futures.DefaultSources()...)),
+	}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -51,6 +59,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/schedule", s.putSchedule)
 	mux.HandleFunc("POST /api/notify/test", s.notifyTest)
 	mux.HandleFunc("POST /api/backtest", s.postBacktest)
+	mux.HandleFunc("GET /api/futures/varieties", s.futuresVarieties)
+	mux.HandleFunc("GET /api/futures/contracts", s.futuresContracts)
+	mux.HandleFunc("GET /api/futures/scan", s.futuresScan)
+	mux.HandleFunc("POST /api/futures/backtest", s.futuresBacktest)
+	mux.HandleFunc("POST /api/futures/watch/start", s.futuresWatchStart)
+	mux.HandleFunc("POST /api/futures/watch/config", s.futuresWatchStart)
+	mux.HandleFunc("POST /api/futures/watch/stop", s.futuresWatchStop)
+	mux.HandleFunc("GET /api/futures/watch/status", s.futuresWatchStatus)
+	mux.HandleFunc("GET /api/futures/watch/events", s.futuresWatchEvents)
 	mux.Handle("/", webembed.Handler())
 	return mux
 }
@@ -498,6 +515,109 @@ func (s *Server) postBacktest(w http.ResponseWriter, r *http.Request) {
 	res, err := backtest.Run(s.Store, strat, params, body.From, body.To, body.HoldDays)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeOK(w, res)
+}
+
+func futuresParamsFromQuery(r *http.Request) futures.Params {
+	q := r.URL.Query()
+	p := futures.Params{
+		Symbol: q.Get("symbol"),
+		Period: q.Get("period"),
+	}
+	if n, err := strconv.Atoi(q.Get("orb")); err == nil {
+		p.ORB = n
+	}
+	if n, err := strconv.Atoi(q.Get("donchian")); err == nil {
+		p.Donchian = n
+	}
+	if n, err := strconv.Atoi(q.Get("atr_period")); err == nil {
+		p.ATRPeriod = n
+	}
+	if n, err := strconv.ParseFloat(q.Get("atr_k"), 64); err == nil {
+		p.ATRK = n
+	}
+	if n, err := strconv.ParseFloat(q.Get("vol_ratio"), 64); err == nil {
+		p.VolRatio = n
+	}
+	if n, err := strconv.Atoi(q.Get("hold_bars")); err == nil {
+		p.HoldBars = n
+	}
+	return p
+}
+
+func (s *Server) futuresVarieties(w http.ResponseWriter, _ *http.Request) {
+	writeOK(w, futures.ListVarieties())
+}
+
+func (s *Server) futuresContracts(w http.ResponseWriter, r *http.Request) {
+	prefix := strings.TrimSpace(r.URL.Query().Get("prefix"))
+	if prefix == "" {
+		writeErr(w, http.StatusBadRequest, "缺少品种 prefix")
+		return
+	}
+	c := &futures.Client{}
+	list, err := c.ContractsByPrefix(r.Context(), prefix)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeOK(w, list)
+}
+
+func (s *Server) futuresScan(w http.ResponseWriter, r *http.Request) {
+	c := &futures.Client{}
+	snap, err := c.Scan(r.Context(), futuresParamsFromQuery(r))
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeOK(w, snap)
+}
+
+func (s *Server) futuresWatchStart(w http.ResponseWriter, r *http.Request) {
+	var cfg futures.WatchConfig
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&cfg); err != nil {
+		writeErr(w, http.StatusBadRequest, "无效 JSON")
+		return
+	}
+	st, err := s.Watch.Start(cfg)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeOK(w, st)
+}
+
+func (s *Server) futuresWatchStop(w http.ResponseWriter, _ *http.Request) {
+	writeOK(w, s.Watch.Stop())
+}
+
+func (s *Server) futuresWatchStatus(w http.ResponseWriter, _ *http.Request) {
+	writeOK(w, s.Watch.Status())
+}
+
+func (s *Server) futuresWatchEvents(w http.ResponseWriter, r *http.Request) {
+	var since int64
+	if raw := r.URL.Query().Get("since"); raw != "" {
+		if n, err := strconv.ParseInt(raw, 10, 64); err == nil {
+			since = n
+		}
+	}
+	writeOK(w, s.Watch.Events(since))
+}
+
+func (s *Server) futuresBacktest(w http.ResponseWriter, r *http.Request) {
+	var p futures.Params
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&p); err != nil {
+		writeErr(w, http.StatusBadRequest, "无效 JSON")
+		return
+	}
+	// 本地 SQLite 优先（futures-sync 灌过就有），缺数据才走多源网络并回写
+	res, err := futures.BacktestWithSource(r.Context(), s.Bars, p)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err.Error())
 		return
 	}
 	writeOK(w, res)

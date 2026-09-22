@@ -142,7 +142,10 @@ CREATE TABLE IF NOT EXISTS app_meta (
 	value TEXT
 );
 `
-	_, err := s.db.Exec(ddl)
+	if _, err := s.db.Exec(ddl); err != nil {
+		return err
+	}
+	_, err := s.db.Exec(futuresDDL)
 	return err
 }
 
