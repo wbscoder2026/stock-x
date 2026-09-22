@@ -196,6 +196,10 @@ export function stopFuturesWatch() {
   return apiSend<FuturesWatchStatus>('/api/futures/watch/stop', 'POST', {})
 }
 
+export function fetchFuturesWatchConfig() {
+  return apiGet<FuturesWatchConfig>('/api/futures/watch/config')
+}
+
 export function fetchFuturesWatchStatus() {
   return apiGet<FuturesWatchStatus>('/api/futures/watch/status')
 }

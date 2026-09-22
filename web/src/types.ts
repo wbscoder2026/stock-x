@@ -158,6 +158,8 @@ export type FuturesParams = {
   hold_bars?: number
   stop_atr?: number
   no_overnight?: boolean
+  from?: string
+  to?: string
   rr?: number
 }
 
@@ -176,6 +178,8 @@ export type FuturesBlacklistEntry = {
 }
 
 export type FuturesWatchConfig = FuturesParams & {
+  alert_ttl_min?: number // 提醒保留时长（分钟），1~1440
+  enabled?: boolean // 是否开着监控（服务端按它自动恢复，保存时由服务端回填）
   interval?: number
   prefixes?: string[]
   alert?: FuturesWatchAlert
@@ -258,6 +262,8 @@ export type FuturesSweepRequest = {
   hold_bars?: number[]
   stop_atr?: number[]
   no_overnight?: number[]
+  from?: string
+  to?: string
   rr?: number[]
   objective?: FuturesSweepObjective
   min_trades?: number
@@ -310,6 +316,8 @@ export type FuturesBacktestResult = {
   hold_exits?: number
   eod_exits?: number
   skipped_eod?: number
+  from?: string
+  to?: string
   items: FuturesOutcome[]
   bars?: FuturesKlineBar[]
 }

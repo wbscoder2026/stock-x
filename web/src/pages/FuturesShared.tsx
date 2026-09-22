@@ -188,6 +188,30 @@ export const TIPS: Record<string, ReactNode> = {
       某个级别取不到数据（上游没这段历史）不会拖垮整次扫描，会被跳过并在结果里标注。
     </>
   ),
+  alert_ttl: (
+    <>
+      <b>提醒保留时长（分钟，默认 30）</b>
+      <br />
+      超过这个时长的突破提醒会<b>自动从列表清除，也不再外发</b>（突破讲究时效，卡了很久的行情再弹出来是噪音）。
+      <br />
+      按<b>K 线时间</b>算「现在 − 时长」，所以不会因为刷新页面/重启服务把老提醒捡回来。
+      <br />
+      范围 1~1440 分钟；被清掉的事件仍留在去重表里，同一根 K 线不会被重复提醒。
+    </>
+  ),
+  range: (
+    <>
+      <b>回测时间范围（默认不限）</b>
+      <br />
+      按<b>信号时间</b>筛选：只有落在范围内的突破才计入。可只选日期（当天整天算在内）也可以精确到分钟。
+      <br />
+      <b>出场可以延续到结束时间之后</b>（持有期自然走完）—— 否则会把当日尾盘的信号系统性砍掉、统计有偏。
+      <br />
+      指标（ATR / Donchian / 关键位）仍然用范围之前的全部历史数据计算，所以缩小区间不会让指标失准（也不会引入未来函数）。
+      <br />
+      数据覆盖有限：上游分钟线只留最近约 1000 根，选太早的区间会没有样本。
+    </>
+  ),
   overnight: (
     <>
       <b>是否允许隔夜持有（默认允许）</b>
@@ -239,7 +263,7 @@ export const TIPS: Record<string, ReactNode> = {
 
 export function ParamLabel({ text, hint }: { text: string; hint: ReactNode }) {
   return (
-    <span className="param-label">
+    <span className="param-label" onClick={(e) => e.stopPropagation()}>
       {text}
       <Tooltip title={<div className="param-tip">{hint}</div>} placement="top">
         <span className="param-help" aria-label={`${text}是什么意思`}>

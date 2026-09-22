@@ -58,6 +58,8 @@ type SweepRequest struct {
 	HoldBars    []int     `json:"hold_bars"`
 	StopATR     []float64 `json:"stop_atr"`
 	NoOvernight []int     `json:"no_overnight"` // 0 = 允许隔夜，1 = 日内策略（可作为筛选轴）
+	From        string    `json:"from"`         // 时间范围筛选（对每个组合都生效，不是轴）
+	To          string    `json:"to"`
 	RR          []float64 `json:"rr"`
 	Objective   string    `json:"objective"`  // win_rate | avg_return | avg_r | profit_factor
 	MinTrades   int       `json:"min_trades"` // 少于这个样本数标记「样本不足」
@@ -144,6 +146,9 @@ func normalizeSweep(req SweepRequest) (SweepRequest, error) {
 		req.Limit = SweepDefaultLimit
 	}
 	req.Workers = normalizeWorkers(req.Workers)
+	if err := ValidateBacktestParams(Params{From: req.From, To: req.To}); err != nil {
+		return req, err
+	}
 	req.ORB = intAxis(req.ORB, d.ORB)
 	req.Donchian = intAxis(req.Donchian, d.Donchian)
 	req.ATRPeriod = intAxis(req.ATRPeriod, d.ATRPeriod)
@@ -325,7 +330,7 @@ func sweepCombos(p SweepRequest) []Params {
 		{toF(p.NoOvernight), func(pp *Params, v float64) { pp.NoOvernight = v > 0 }},
 		{p.RR, func(pp *Params, v float64) { pp.RR = v }},
 	}
-	out := []Params{{Symbol: p.Symbol, Period: p.Period}}
+	out := []Params{{Symbol: p.Symbol, Period: p.Period, From: p.From, To: p.To}}
 	for _, a := range axes {
 		next := make([]Params, 0, len(out)*len(a.vals))
 		for _, cur := range out {

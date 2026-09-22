@@ -56,8 +56,12 @@ type Params struct {
 	HoldBars  int     `json:"hold_bars"`
 	StopATR   float64 `json:"stop_atr"` // 止损 = 入场 ∓ 该倍数 × ATR
 	// NoOvernight 日内策略：当日「日盘」收盘前必须平仓，不持隔夜（夜盘属次日交易时段，也不持有）。
-	NoOvernight bool    `json:"no_overnight"`
-	RR          float64 `json:"rr"`
+	NoOvernight bool `json:"no_overnight"`
+	// From / To 回测信号的时间范围（含边界）；空 = 不限。
+	// 支持 "2006-01-02"（整天）或 "2006-01-02 15:04"。
+	From string  `json:"from"`
+	To   string  `json:"to"`
+	RR   float64 `json:"rr"`
 }
 
 func DefaultParams() Params {
@@ -185,6 +189,8 @@ type Result struct {
 	HoldExits    int        `json:"hold_exits"`
 	EODExits     int        `json:"eod_exits"`   // 日内收盘平仓（禁止隔夜时）
 	SkippedEOD   int        `json:"skipped_eod"` // 因禁止隔夜而不可交易、被跳过的信号数
+	From         string     `json:"from"`        // 实际生效的起始时间（空 = 不限）
+	To           string     `json:"to"`          // 实际生效的结束时间（空 = 不限）
 	Items        []Outcome  `json:"items"`
 	Bars         []KlineBar `json:"bars"`
 }

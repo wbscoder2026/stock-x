@@ -8,6 +8,7 @@ import {
   addFuturesBlacklist,
   fetchFuturesBlacklist,
   fetchFuturesVarieties,
+  fetchFuturesWatchConfig,
   fetchFuturesWatchEvents,
   fetchFuturesWatchStatus,
   removeFuturesBlacklist,
@@ -20,13 +21,48 @@ import type {
   FuturesBlacklistEntry,
   FuturesBlacklistScope,
   FuturesVariety,
+  FuturesWatchConfig,
   FuturesWatchEvent,
   FuturesWatchStatus,
 } from '../types'
 import { DEFAULT_PARAMS, LEVEL_OPTIONS, ParamLabel, TIPS, fmtPrice, varietyOptions } from './FuturesShared'
 
-// 提醒有时效：超过 TTL 的提醒自动从列表清除（服务端 AlertTTL=30min，下发值优先）
-const DEFAULT_ALERT_TTL_SEC = 1800
+// 提醒有时效：超过 TTL 的提醒自动从列表清除（时长可在页面上配，服务端下发值优先）
+const DEFAULT_ALERT_TTL_MIN = 30
+const DEFAULT_ALERT_TTL_SEC = DEFAULT_ALERT_TTL_MIN * 60
+const MAX_ALERT_TTL_MIN = 1440
+
+// 表单值 → 监控配置。字段顺序固定，这样可以用 JSON 串直接比对「有没有改过」。
+function toWatchConfig(v: {
+  period: string
+  orb: number
+  donchian: number
+  atrPeriod: number
+  atrK: number
+  volRatio: number
+  stopATR: number
+  rr: number
+  interval: number
+  prefixes: string[]
+  feishu: boolean
+  desktop: boolean
+  ttlMin: number
+}): FuturesWatchConfig {
+  return {
+    period: v.period,
+    orb: v.orb,
+    donchian: v.donchian,
+    atr_period: v.atrPeriod,
+    atr_k: v.atrK,
+    vol_ratio: v.volRatio,
+    stop_atr: v.stopATR,
+    rr: v.rr,
+    interval: v.interval,
+    prefixes: v.prefixes,
+    alert: { feishu: v.feishu, desktop: v.desktop },
+    alert_ttl_min: v.ttlMin,
+  }
+}
 
 // pruneAlerts 剔除过期提醒；突破讲究时效，过期的信息是噪音。
 function pruneAlerts(list: FuturesWatchEvent[], ttlMs: number, now = Date.now()): FuturesWatchEvent[] {
@@ -126,8 +162,12 @@ export default function FuturesWatchPage() {
   const [alerts, setAlerts] = useState<FuturesWatchEvent[]>([])
   const [watchBusy, setWatchBusy] = useState(false)
   const [alertFeishu, setAlertFeishu] = useState(false)
-  const [alertDesktop, setAlertDesktop] = useState(false)
+  const [alertDesktop, setAlertDesktop] = useState(true) // 默认开桌面通知
+  const [alertTTLMin, setAlertTTLMin] = useState(DEFAULT_ALERT_TTL_MIN)
   const [testingAlert, setTestingAlert] = useState(false)
+  const [savedAt, setSavedAt] = useState('')
+  const [hydrateErr, setHydrateErr] = useState('')
+  // 卸载回调读不到 state，用 ref 镜像一份
   const [blacklist, setBlacklist] = useState<FuturesBlacklistEntry[]>([])
   const [blacklistOpen, setBlacklistOpen] = useState(false)
   const [blTarget, setBlTarget] = useState<FuturesWatchEvent>()
@@ -138,6 +178,13 @@ export default function FuturesWatchPage() {
   const runningRef = useRef(false)
   const firstPullRef = useRef(true)
   const blacklistLoadedRef = useRef(false)
+  const hydratedRef = useRef(false) // 表单是否已用服务端保存的配置回填过
+  const lastSavedRef = useRef('') // 上次保存的配置串，避免回填后立刻重复保存
+  const pendingRef = useRef('') // 防抖窗口里还没保存的配置串
+  const latestRef = useRef<FuturesWatchConfig | undefined>(undefined) // 最新配置（卸载时补发用）
+  const hydrateErrRef = useRef('')
+  // 保存请求串行化：并发/乱序会让「后发的先到」，把新参数覆盖成旧的
+  const saveChainRef = useRef<Promise<unknown>>(Promise.resolve())
 
   useEffect(() => {
     void (async () => {
@@ -153,28 +200,33 @@ export default function FuturesWatchPage() {
   const varietyOpts = useMemo(() => varietyOptions(varieties), [varieties])
 
   const watchRunning = watch?.running ?? false
-  const alertTTLSec = watch?.alert_ttl_sec ?? DEFAULT_ALERT_TTL_SEC
+  // 运行中显示服务端实际生效的时长；没在跑就显示表单里的值（保存后生效）
+  const alertTTLSec = watch?.running ? (watch.alert_ttl_sec ?? DEFAULT_ALERT_TTL_SEC) : alertTTLMin * 60
   const coolingSources = (watch?.sources ?? [])
     .filter((s) => s.cooldown > 0)
     .map((s) => `${s.name} 冷却 ${s.cooldown}s`)
     .join('，')
 
   const watchConfig = useMemo(
-    () => ({
-      period,
-      orb,
-      donchian,
-      atr_period: atrPeriod,
-      atr_k: atrK,
-      vol_ratio: volRatio,
-      stop_atr: stopATR,
-      rr,
-      interval: watchInterval,
-      prefixes: watchPrefixes,
-      alert: { feishu: alertFeishu, desktop: alertDesktop },
-    }),
-    [period, orb, donchian, atrPeriod, atrK, volRatio, stopATR, rr, watchInterval, watchPrefixes, alertFeishu, alertDesktop],
+    () =>
+      toWatchConfig({
+        period,
+        orb,
+        donchian,
+        atrPeriod,
+        atrK,
+        volRatio,
+        stopATR,
+        rr,
+        interval: watchInterval,
+        prefixes: watchPrefixes,
+        feishu: alertFeishu,
+        desktop: alertDesktop,
+        ttlMin: alertTTLMin,
+      }),
+    [period, orb, donchian, atrPeriod, atrK, volRatio, stopATR, rr, watchInterval, watchPrefixes, alertFeishu, alertDesktop, alertTTLMin],
   )
+  const configKey = useMemo(() => JSON.stringify(watchConfig), [watchConfig])
 
   // 点提醒行 → 跳到「回测」页加载该月份合约 + 对应级别的价格图（关键位会画在图上）
   function openAlert(e: FuturesWatchEvent) {
@@ -324,19 +376,106 @@ export default function FuturesWatchPage() {
     }
   }, [notifyBreakout, reloadBlacklist])
 
-  // 监控运行中改「级别 / ORB / Donchian / ATR / 量能 / 盈亏比 / 间隔 / 品种」→ 自动热更新（防抖 500ms）
+  // 进页面/切标签回来：用服务端保存的配置回填表单（不然每次都变回初始值）
   useEffect(() => {
-    if (!runningRef.current) return
-    const timer = window.setTimeout(() => {
-      void updateFuturesWatch(watchConfig)
+    let cancelled = false
+    void (async () => {
+      try {
+        const cfg = await fetchFuturesWatchConfig()
+        if (cancelled) return
+        setPeriod(cfg.period ?? DEFAULT_PARAMS.period)
+        setOrb(cfg.orb ?? DEFAULT_PARAMS.orb)
+        setDonchian(cfg.donchian ?? DEFAULT_PARAMS.donchian)
+        setAtrPeriod(cfg.atr_period ?? DEFAULT_PARAMS.atrPeriod)
+        setAtrK(cfg.atr_k ?? DEFAULT_PARAMS.atrK)
+        setVolRatio(cfg.vol_ratio ?? DEFAULT_PARAMS.volRatio)
+        setStopATR(cfg.stop_atr ?? DEFAULT_PARAMS.stopATR)
+        setRr(cfg.rr ?? DEFAULT_PARAMS.rr)
+        setWatchInterval(cfg.interval ?? 30)
+        setWatchPrefixes(cfg.prefixes ?? [])
+        setAlertFeishu(!!cfg.alert?.feishu)
+        setAlertDesktop(cfg.alert?.desktop ?? true) // 没配过 → 默认开
+        setAlertTTLMin(cfg.alert_ttl_min ?? DEFAULT_ALERT_TTL_MIN)
+        // 记下「刚回填的样子」，这样下面不会因为回填本身触发一次保存
+        lastSavedRef.current = JSON.stringify(
+          toWatchConfig({
+            period: cfg.period ?? DEFAULT_PARAMS.period,
+            orb: cfg.orb ?? DEFAULT_PARAMS.orb,
+            donchian: cfg.donchian ?? DEFAULT_PARAMS.donchian,
+            atrPeriod: cfg.atr_period ?? DEFAULT_PARAMS.atrPeriod,
+            atrK: cfg.atr_k ?? DEFAULT_PARAMS.atrK,
+            volRatio: cfg.vol_ratio ?? DEFAULT_PARAMS.volRatio,
+            stopATR: cfg.stop_atr ?? DEFAULT_PARAMS.stopATR,
+            rr: cfg.rr ?? DEFAULT_PARAMS.rr,
+            interval: cfg.interval ?? 30,
+            prefixes: cfg.prefixes ?? [],
+            feishu: !!cfg.alert?.feishu,
+            desktop: cfg.alert?.desktop ?? true,
+            ttlMin: cfg.alert_ttl_min ?? DEFAULT_ALERT_TTL_MIN,
+          }),
+        )
+        hydratedRef.current = true
+        // 默认开着桌面通知：顺手申请一次浏览器权限（被拒也不影响服务端推送）
+        if ((cfg.alert?.desktop ?? true) && typeof Notification !== 'undefined' && Notification.permission === 'default') {
+          void Notification.requestPermission()
+        }
+      } catch (e) {
+        // 读不到就别让自动保存跑起来：否则表单里的默认值会把服务端已保存的配置覆盖掉
+        const msg = e instanceof Error ? e.message : '读取失败'
+        hydrateErrRef.current = msg
+        setHydrateErr(msg)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  // 保存（串行排队）：运行中顺带热生效，返回的状态只用于更新界面
+  const saveConfig = useCallback(
+    (cfg: FuturesWatchConfig, key: string) => {
+      const running = runningRef.current
+      saveChainRef.current = saveChainRef.current
+        .then(() => updateFuturesWatch(cfg))
         .then((status) => {
-          setWatch(status)
-          message.success('监控配置已更新')
+          lastSavedRef.current = key
+          if (running) setWatch(status)
+          setSavedAt(new Date().toLocaleTimeString('zh-CN', { hour12: false }))
+          if (running) message.success('监控配置已更新')
         })
-        .catch((e) => message.error(e instanceof Error ? e.message : '监控配置更新失败'))
+        .catch((e) => {
+          lastSavedRef.current = '' // 存失败 → 下次改动还会重试
+          message.error(e instanceof Error ? e.message : '监控配置保存失败')
+        })
+    },
+    [message],
+  )
+
+  // 改任意参数 → 防抖 500ms 自动保存；运行中同时热生效（一个入口两种效果，行为一致）
+  useEffect(() => {
+    latestRef.current = watchConfig
+    if (!hydratedRef.current || hydrateErr) return // 没回填成功就不敢往库里写
+    if (lastSavedRef.current === configKey) return // 没变过就别写库
+    pendingRef.current = configKey
+    const timer = window.setTimeout(() => {
+      pendingRef.current = ''
+      saveConfig(watchConfig, configKey)
     }, 500)
     return () => window.clearTimeout(timer)
-  }, [watchConfig, message])
+  }, [configKey, watchConfig, hydrateErr, saveConfig])
+
+  // 卸载（切标签/离开页面）时把还卡在防抖窗口里的改动补发一次，
+  // 否则「改完立刻切走」还是会丢 —— 路由切换不会取消已发出的请求。
+  useEffect(
+    () => () => {
+      const key = pendingRef.current
+      const cfg = latestRef.current
+      pendingRef.current = ''
+      if (!key || !cfg || !hydratedRef.current || hydrateErrRef.current) return
+      saveConfig(cfg, key)
+    },
+    [saveConfig],
+  )
 
   async function toggleWatch(next: boolean) {
     setWatchBusy(true)
@@ -446,6 +585,13 @@ export default function FuturesWatchPage() {
             value={watchInterval}
             onChange={(v) => setWatchInterval(Number(v ?? 30))}
           />
+          <ParamLabel text="提醒保留(分钟)" hint={TIPS.alert_ttl} />
+          <InputNumber
+            min={1}
+            max={MAX_ALERT_TTL_MIN}
+            value={alertTTLMin}
+            onChange={(v) => setAlertTTLMin(Number(v ?? DEFAULT_ALERT_TTL_MIN))}
+          />
           <Select
             mode="multiple"
             allowClear
@@ -482,7 +628,20 @@ export default function FuturesWatchPage() {
           {watch?.last_tick ? ` · 最后扫描 ${watch.last_tick}` : ''}
           {watch?.alert_note ? ` · 提醒：${watch.alert_note}` : ''}
           {watch?.last_error ? ` · 最近错误：${watch.last_error}` : ''}
+          {savedAt ? ` · 参数已保存 ${savedAt}` : ''}
         </Typography.Paragraph>
+        {hydrateErr ? (
+          <Typography.Paragraph type="danger" style={{ fontSize: 12, marginBottom: 8 }}>
+            没能读到服务端保存的监控参数（{hydrateErr}）。为避免用页面上的默认值覆盖已保存的配置，
+            已暂停自动保存 —— 刷新页面重试即可。
+          </Typography.Paragraph>
+        ) : null}
+        {alertDesktop && typeof Notification !== 'undefined' && Notification.permission === 'denied' ? (
+          <Typography.Paragraph type="warning" style={{ fontSize: 12, marginBottom: 8 }}>
+            浏览器通知被拒绝：服务端桌面通知照常发，但「停在页面上时的浏览器弹窗」收不到 ——
+            想恢复请点地址栏左侧的站点设置，把「通知」改成允许。
+          </Typography.Paragraph>
+        ) : null}
         <Table
           size="small"
           rowKey={(r) => String(r.seq)}

@@ -74,8 +74,15 @@ func filterBlacklisted(events []Event, prefix, contract string, bl Blacklist) []
 	return events
 }
 
-// AlertTTL 突破提醒的时效：超过这个时长的提醒自动从列表清除（突破讲究时效，过期信息是噪音）。
-const AlertTTL = 30 * time.Minute
+// 提醒保留时长（分钟）：页面上可改，服务端启动时从库里恢复。
+const (
+	DefaultAlertTTLMin = 30   // 默认 30 分钟
+	MinAlertTTLMin     = 1    // 至少 1 分钟（0 会被当成「没填」）
+	MaxAlertTTLMin     = 1440 // 最多 24 小时
+)
+
+// AlertTTL 默认提醒时效（保留给默认值引用与文档）。
+const AlertTTL = DefaultAlertTTLMin * time.Minute
 
 // AlertConfig 外发提醒开关（真正的发送由调用方实现，见 Watcher.OnEvents）
 type AlertConfig struct {
@@ -86,9 +93,49 @@ type AlertConfig struct {
 // WatchConfig 监控配置。Params 内嵌成扁平 JSON，前端可直接复用突破页的参数对象。
 type WatchConfig struct {
 	Params
-	Interval int         `json:"interval"` // 轮询秒数，0 → 默认 30
-	Prefixes []string    `json:"prefixes"` // 要监控的品种码；空 = 全市场
-	Alert    AlertConfig `json:"alert"`    // 系统级提醒（离开浏览器也能收到）
+	Interval    int         `json:"interval"`      // 轮询秒数，0 → 默认 30
+	Prefixes    []string    `json:"prefixes"`      // 要监控的品种码；空 = 全市场
+	Alert       AlertConfig `json:"alert"`         // 系统级提醒（离开浏览器也能收到）
+	AlertTTLMin int         `json:"alert_ttl_min"` // 提醒保留时长（分钟），0 → 默认 30，范围 1~1440
+	// Enabled 是「是否开着监控」的持久化意愿：服务端启动时据此自动恢复。
+	// 注意它与 running 是两回事：真正在跑没跑以 Watcher 的运行时状态为准，
+	// 保存时由调用方按当时的运行状态回填（不信任前端传值）。
+	Enabled bool `json:"enabled"`
+}
+
+// DefaultWatchConfig 用户没配过时的初值：默认开启监控 + 默认开桌面通知。
+// （飞书要配 FEISHU_WEBHOOK_URL，默认不开，免得每轮都报通道未配置。）
+func DefaultWatchConfig() WatchConfig {
+	return WatchConfig{
+		Params:      DefaultParams(),
+		Interval:    WatchDefaultInterval,
+		Alert:       AlertConfig{Desktop: true},
+		AlertTTLMin: DefaultAlertTTLMin,
+		Enabled:     true,
+	}
+}
+
+// clampAlertTTLMin 提醒保留时长：没填/非法 → 默认值，超范围 → 夹到边界。
+func clampAlertTTLMin(min int) int {
+	if min <= 0 {
+		return DefaultAlertTTLMin
+	}
+	if min < MinAlertTTLMin {
+		return MinAlertTTLMin
+	}
+	if min > MaxAlertTTLMin {
+		return MaxAlertTTLMin
+	}
+	return min
+}
+
+// NormalizeWatchConfig 补齐缺省项：老版本存下的配置、前端没传的字段都能安全落地。
+// 注意不动 Enabled（false 是合法值，代表用户主动关了监控）。
+func NormalizeWatchConfig(cfg WatchConfig) WatchConfig {
+	cfg.Params = mergeParams(cfg.Params)
+	cfg.Interval = clampInterval(cfg.Interval)
+	cfg.AlertTTLMin = clampAlertTTLMin(cfg.AlertTTLMin)
+	return cfg
 }
 
 // WatchEvent 一条突破提醒
@@ -627,8 +674,7 @@ func collectNew(seen map[string]int64, evs []Event, prevLastBar time.Time, day s
 
 // Start 启动监控；已在运行则用新配置继续（配置随时可改）。
 func (t *Watcher) Start(cfg WatchConfig) (WatchStatus, error) {
-	cfg.Params = mergeParams(cfg.Params)
-	cfg.Interval = clampInterval(cfg.Interval)
+	cfg = NormalizeWatchConfig(cfg)
 	varieties, err := watchUniverse(cfg.Prefixes)
 	if err != nil {
 		return WatchStatus{}, err
@@ -694,7 +740,7 @@ func (t *Watcher) Events(since int64) []WatchEvent {
 // 注意：只清理「列表」，seen 里仍保留去重记录，所以同一根 K 线不会被重复提醒。
 func (t *Watcher) pruneExpiredLocked(now time.Time) {
 	if len(t.events) > 0 {
-		cut := now.Add(-AlertTTL).UnixMilli()
+		cut := now.Add(-t.alertTTLLocked()).UnixMilli()
 		kept := t.events[:0]
 		for _, e := range t.events {
 			if e.TimeMS > 0 && e.TimeMS < cut {
@@ -709,11 +755,17 @@ func (t *Watcher) pruneExpiredLocked(now time.Time) {
 	}
 }
 
+// alertTTLLocked 当前生效的提醒保留时长（需持锁）。
+// 页面没配过（或被清零）时用默认值，所以老配置不会突然变成「全清」。
+func (t *Watcher) alertTTLLocked() time.Duration {
+	return time.Duration(clampAlertTTLMin(t.cfg.AlertTTLMin)) * time.Minute
+}
+
 func (t *Watcher) statusLocked() WatchStatus {
 	t.pruneExpiredLocked(t.now()) // 状态里的条数也按时效算
 	st := WatchStatus{
 		Running:     t.running,
-		AlertTTLSec: int(AlertTTL / time.Second),
+		AlertTTLSec: int(t.alertTTLLocked() / time.Second),
 		Config:      t.cfg,
 		Source:      t.bars.Last(),
 		Sources:     t.bars.Status(),

@@ -2,7 +2,9 @@
 // 与「监控突破」页拆开：这里不订阅任何行情，只在你点按钮时取一次数据。
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { Alert, App, Button, Card, Form, InputNumber, Select, Space, Statistic, Switch, Table, Tag, Tooltip, Typography } from 'antd'
+import dayjs from 'dayjs'
+import type { Dayjs } from 'dayjs'
+import { Alert, App, Button, Card, DatePicker, Form, InputNumber, Select, Space, Statistic, Switch, Table, Tag, Tooltip, Typography } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import { fetchFuturesContracts, fetchFuturesScan, fetchFuturesVarieties, postFuturesBacktest, postFuturesSweep } from '../api'
 import type {
@@ -30,6 +32,8 @@ import {
   pct,
   varietyOptions,
 } from './FuturesShared'
+
+type RangeValue = [Dayjs | null, Dayjs | null] | null
 
 const eventCols: ColumnsType<FuturesEvent> = [
   { title: '时间', dataIndex: 'time', width: 150 },
@@ -117,7 +121,76 @@ function numAxis(vals: string[], fallback: number): number[] {
   return parsed.length ? parsed : [fallback]
 }
 
-const sweepCols = (onApply: (row: FuturesSweepRow) => void): ColumnsType<FuturesSweepRow> => [
+// 排序：不依赖 Table 内置排序（antd v6 行为与 v5 有差异，点了不动），
+// 自己维护 sortKey/sortAsc + 点击表头切换，行为完全可预期。
+type SweepSortKey =
+  | 'win_rate' | 'avg_return' | 'avg_r' | 'profit_factor' | 'trades'
+  | 'rr' | 'stop_atr' | 'hold_bars' | 'donchian' | 'orb'
+
+const SWEEP_SORT_LABEL: Record<SweepSortKey, string> = {
+  win_rate: '胜率',
+  avg_return: '平均收益',
+  avg_r: '期望R',
+  profit_factor: '盈利因子',
+  trades: '样本',
+  rr: '盈亏比',
+  stop_atr: '止损ATR',
+  hold_bars: '持有',
+  donchian: 'Donchian',
+  orb: 'ORB',
+}
+
+function sweepSortValue(r: FuturesSweepRow, key: SweepSortKey): number {
+  switch (key) {
+    case 'win_rate': return r.win_rate ?? 0
+    case 'avg_return': return r.avg_return ?? 0
+    case 'avg_r': return r.avg_r ?? 0
+    case 'profit_factor': return r.profit_factor ?? 0
+    case 'trades': return r.trades ?? 0
+    case 'rr': return r.params.rr ?? 0
+    case 'stop_atr': return r.params.stop_atr ?? 0
+    case 'hold_bars': return r.params.hold_bars ?? 0
+    case 'donchian': return r.params.donchian ?? 0
+    case 'orb': return r.params.orb ?? 0
+  }
+}
+
+// SortHeader 可点击表头：显示当前排序方向，点击切换 降序 → 升序 → 降序。
+function SortHeader({
+  text, hint, sortKey, activeKey, asc, onSort,
+}: {
+  text: string
+  hint?: React.ReactNode
+  sortKey: SweepSortKey
+  activeKey?: SweepSortKey
+  asc: boolean
+  onSort: (key: SweepSortKey) => void
+}) {
+  const active = activeKey === sortKey
+  return (
+    <span
+      role="button"
+      tabIndex={0}
+      onClick={() => onSort(sortKey)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') onSort(sortKey)
+      }}
+      style={{ cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap' }}
+      title={`按${text}排序`}
+    >
+      {hint ? <ParamLabel text={text} hint={hint} /> : text}
+      <span style={{ marginLeft: 4, color: active ? '#1677ff' : '#bbb', fontSize: 10 }}>
+        {active ? (asc ? '▲' : '▼') : '↕'}
+      </span>
+    </span>
+  )
+}
+
+const sweepCols = (
+  onApply: (row: FuturesSweepRow) => void,
+  sort: { key?: SweepSortKey; asc: boolean; onSort: (key: SweepSortKey) => void },
+): ColumnsType<FuturesSweepRow> => [
+  { title: '#', key: 'idx', width: 46, render: (_, __, i) => i + 1 },
   { title: '#', key: 'idx', width: 46, render: (_, __, i) => i + 1 },
   {
     title: <ParamLabel text="级别" hint={TIPS.sweep_period} />,
@@ -125,41 +198,38 @@ const sweepCols = (onApply: (row: FuturesSweepRow) => void): ColumnsType<Futures
     width: 90,
     render: (v: string) => `${v}分钟`,
   },
-  { title: '盈亏比', dataIndex: ['params', 'rr'], width: 80, sorter: (a, b) => (a.params.rr ?? 0) - (b.params.rr ?? 0) },
-  { title: '止损ATR', dataIndex: ['params', 'stop_atr'], width: 88, sorter: (a, b) => (a.params.stop_atr ?? 0) - (b.params.stop_atr ?? 0) },
+  { ...{ title: <SortHeader text="盈亏比" sortKey="rr" activeKey={sort.key} asc={sort.asc} onSort={sort.onSort} /> }, dataIndex: ['params', 'rr'], width: 80 },
+  { title: <SortHeader text="止损ATR" sortKey="stop_atr" activeKey={sort.key} asc={sort.asc} onSort={sort.onSort} />, dataIndex: ['params', 'stop_atr'], width: 88 },
   {
     title: <ParamLabel text="隔夜" hint={TIPS.overnight} />,
     dataIndex: ['params', 'no_overnight'],
     width: 88,
     render: (v: boolean) => (v ? <Tag color="orange">日内</Tag> : <Tag>允许</Tag>),
   },
-  { title: '持有', dataIndex: ['params', 'hold_bars'], width: 70, sorter: (a, b) => (a.params.hold_bars ?? 0) - (b.params.hold_bars ?? 0) },
-  { title: 'Donchian', dataIndex: ['params', 'donchian'], width: 90, sorter: (a, b) => (a.params.donchian ?? 0) - (b.params.donchian ?? 0) },
-  { title: 'ORB', dataIndex: ['params', 'orb'], width: 70, sorter: (a, b) => (a.params.orb ?? 0) - (b.params.orb ?? 0) },
+  { title: <SortHeader text="持有" sortKey="hold_bars" activeKey={sort.key} asc={sort.asc} onSort={sort.onSort} />, dataIndex: ['params', 'hold_bars'], width: 70 },
+  { title: <SortHeader text="Donchian" sortKey="donchian" activeKey={sort.key} asc={sort.asc} onSort={sort.onSort} />, dataIndex: ['params', 'donchian'], width: 90 },
+  { title: <SortHeader text="ORB" sortKey="orb" activeKey={sort.key} asc={sort.asc} onSort={sort.onSort} />, dataIndex: ['params', 'orb'], width: 70 },
   { title: 'ATR周期', dataIndex: ['params', 'atr_period'], width: 84 },
   { title: 'ATR缓冲', dataIndex: ['params', 'atr_k'], width: 84 },
   { title: '量能', dataIndex: ['params', 'vol_ratio'], width: 70 },
-  { title: '样本', dataIndex: 'trades', width: 80, sorter: (a, b) => a.trades - b.trades },
-  { title: '胜率', dataIndex: 'win_rate', width: 90, sorter: (a, b) => a.win_rate - b.win_rate, render: (v: number) => pct(v) },
+  { title: <SortHeader text="样本" sortKey="trades" activeKey={sort.key} asc={sort.asc} onSort={sort.onSort} />, dataIndex: 'trades', width: 80 },
+  { title: <SortHeader text="胜率" sortKey="win_rate" activeKey={sort.key} asc={sort.asc} onSort={sort.onSort} />, dataIndex: 'win_rate', width: 96, render: (v: number) => pct(v) },
   {
-    title: '平均收益',
+    title: <SortHeader text="平均收益" sortKey="avg_return" activeKey={sort.key} asc={sort.asc} onSort={sort.onSort} />,
     dataIndex: 'avg_return',
-    width: 100,
-    sorter: (a, b) => a.avg_return - b.avg_return,
+    width: 110,
     render: (v: number) => <span style={{ color: v >= 0 ? '#389e0d' : '#cf1322' }}>{pct(v)}</span>,
   },
   {
-    title: <ParamLabel text="期望R" hint={TIPS.r_multiple} />,
+    title: <SortHeader text="期望R" hint={TIPS.r_multiple} sortKey="avg_r" activeKey={sort.key} asc={sort.asc} onSort={sort.onSort} />,
     dataIndex: 'avg_r',
-    width: 92,
-    sorter: (a, b) => a.avg_r - b.avg_r,
+    width: 100,
     render: (v: number) => v.toFixed(2),
   },
   {
-    title: <ParamLabel text="盈利因子" hint={TIPS.profit_factor} />,
+    title: <SortHeader text="盈利因子" hint={TIPS.profit_factor} sortKey="profit_factor" activeKey={sort.key} asc={sort.asc} onSort={sort.onSort} />,
     dataIndex: 'profit_factor',
-    width: 100,
-    sorter: (a, b) => a.profit_factor - b.profit_factor,
+    width: 110,
     render: (v: number) =>
       v ? v.toFixed(2) : <Tooltip title="没有亏损单（PF 理论上是无穷大）"><span>-</span></Tooltip>,
   },
@@ -229,6 +299,10 @@ export default function FuturesBacktestPage() {
   const [msPerCombo, setMsPerCombo] = useState<number>() // 上次实测的单组耗时，用来估时
   const [sweeping, setSweeping] = useState(false)
   const [sweep, setSweep] = useState<FuturesSweepResult>()
+  const [sortKey, setSortKey] = useState<SweepSortKey>('avg_return')
+  const [sortAsc, setSortAsc] = useState(false)
+  const [onlyReliable, setOnlyReliable] = useState(true)
+  const [range, setRange] = useState<RangeValue>(null)
 
   useEffect(() => {
     void (async () => {
@@ -284,6 +358,8 @@ export default function FuturesBacktestPage() {
     hold_bars: holdBars,
     stop_atr: stopATR,
     no_overnight: !allowOvernight,
+    from: range?.[0]?.format('YYYY-MM-DD HH:mm') ?? '',
+    to: range?.[1]?.format('YYYY-MM-DD HH:mm') ?? '',
     rr,
   }
 
@@ -355,6 +431,24 @@ export default function FuturesBacktestPage() {
     min_trades: minTrades,
     workers,
   }
+  const sweepRows = useMemo(() => {
+    const rows = (sweep?.rows ?? []).filter((r) => !onlyReliable || r.reliable)
+    return [...rows].sort((a, b) => {
+      const d = sweepSortValue(a, sortKey) - sweepSortValue(b, sortKey)
+      if (d !== 0) return sortAsc ? d : -d
+      return (b.trades ?? 0) - (a.trades ?? 0) // 同值按样本多的在前
+    })
+  }, [sweep, sortKey, sortAsc, onlyReliable])
+
+  function toggleSort(key: SweepSortKey) {
+    if (key === sortKey) {
+      setSortAsc((v) => !v)
+      return
+    }
+    setSortKey(key)
+    setSortAsc(false) // 换列默认降序（找最优）
+  }
+
   const comboCount =
     (sweepBody.periods?.length ?? 1) *
     (sweepBody.orb?.length ?? 1) *
@@ -449,6 +543,28 @@ export default function FuturesBacktestPage() {
           <Form.Item label={<ParamLabel text="持有K线" hint={TIPS.hold_bars} />}>
             <InputNumber min={1} value={holdBars} onChange={(v) => setHoldBars(Number(v ?? 6))} />
           </Form.Item>
+          <Form.Item label={<ParamLabel text="时间范围" hint={TIPS.range} />}>
+            <Space size={4}>
+              <DatePicker.RangePicker
+                showTime={{ format: 'HH:mm' }}
+                format="YYYY-MM-DD HH:mm"
+                value={range}
+                onChange={setRange}
+                allowClear
+                placeholder={['不限', '不限']}
+                style={{ width: 330 }}
+              />
+              <Button size="small" onClick={() => setRange([dayjs().subtract(1, 'month'), dayjs()])}>
+                近1月
+              </Button>
+              <Button size="small" onClick={() => setRange([dayjs().subtract(3, 'month'), dayjs()])}>
+                近3月
+              </Button>
+              <Button size="small" onClick={() => setRange(null)}>
+                不限
+              </Button>
+            </Space>
+          </Form.Item>
           <Form.Item label={<ParamLabel text="允许隔夜" hint={TIPS.overnight} />}>
             <Switch checked={allowOvernight} onChange={setAllowOvernight} checkedChildren="允许" unCheckedChildren="日内" />
           </Form.Item>
@@ -486,6 +602,12 @@ export default function FuturesBacktestPage() {
             />
             <ParamLabel text="最少样本" hint={TIPS.min_trades} />
             <InputNumber min={1} max={500} value={minTrades} onChange={(v) => setMinTrades(Number(v ?? 30))} style={{ width: 90 }} />
+            <Tooltip title="隐藏样本数少于「最少样本」的组合（避免被 3 笔 100% 胜率这种组合带偏）">
+              <span className="param-label">
+                只看样本足
+                <Switch size="small" checked={onlyReliable} onChange={setOnlyReliable} />
+              </span>
+            </Tooltip>
             <ParamLabel text="并发" hint={TIPS.workers} />
             <InputNumber min={0} max={64} value={workers} onChange={(v) => setWorkers(Number(v ?? 0))} style={{ width: 80 }} />
             {etaSec && !sweeping ? (
@@ -596,15 +718,20 @@ export default function FuturesBacktestPage() {
             />
             <Table
               size="small"
-              rowKey={(r) => `${r.params.period}-${r.params.rr}-${r.params.stop_atr}-${r.params.hold_bars}-${r.params.donchian}-${r.params.orb}-${r.params.atr_period}-${r.params.atr_k}-${r.params.vol_ratio}`}
-              columns={sweepCols(applySweepRow)}
-              dataSource={sweep.rows}
+              rowKey={(r) =>
+                `${r.params.period}-${r.params.rr}-${r.params.stop_atr}-${r.params.hold_bars}-${r.params.donchian}-` +
+                `${r.params.orb}-${r.params.atr_period}-${r.params.atr_k}-${r.params.vol_ratio}-${r.params.no_overnight ? 1 : 0}`
+              }
+              columns={sweepCols(applySweepRow, { key: sortKey, asc: sortAsc, onSort: toggleSort })}
+              dataSource={sweepRows}
               pagination={{ pageSize: 20, showSizeChanger: false }}
               scroll={{ x: 1400 }}
               locale={{ emptyText: '没有组合跑出样本' }}
               title={() => (
                 <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                  共 {sweep.combos} 个组合（{(sweep.periods ?? []).map((p) => `${p}分钟`).join(' / ')}）· 并发{' '}
+                  共 {sweep.combos} 个组合（{(sweep.periods ?? []).map((p) => `${p}分钟`).join(' / ')}）· 当前 {sweepRows.length}{' '}
+                  行{onlyReliable && sweepRows.length !== sweep.rows.length ? `（已隐藏样本不足的 ${sweep.rows.length - sweepRows.length} 组）` : ''} · 排序：
+                  {SWEEP_SORT_LABEL[sortKey]}{sortAsc ? ' 升序' : ' 降序'} · 并发{' '}
                   {sweep.workers ?? 0} · 回测耗时 {(sweep.elapsed_ms / 1000).toFixed(1)}s · 各级别 K 线根数{' '}
                   {(sweep.periods ?? []).map((p) => `${p}分钟 ${sweep.period_bars?.[p] ?? 0} 根`).join('，')}
                   {' '}—— <b>覆盖区间不同，样本数不可直接横向比</b>
@@ -679,6 +806,9 @@ export default function FuturesBacktestPage() {
             回测规则：入场 = 信号那根收盘价 · 止损 = {stopATR}×ATR · 止盈 = 止损距离×{rr} · 最多持有 {holdBars} 根；
             同根既破止损又触止盈按止损算、跳空按开盘价成交；收益已按突破方向折算，未计手续费与滑点。
             {result.skipped_eod ? ` 因「禁止隔夜」跳过 ${result.skipped_eod} 个收盘后/夜盘的信号（不计入统计）。` : ''}
+            {result.from || result.to
+              ? ` 时间范围 ${result.from || '不限'} ~ ${result.to || '不限'}（按信号时间筛选，出场可延续到范围之后）。`
+              : ' 时间范围：不限。'}
           </Typography.Paragraph>
           <FuturesChart bars={result.bars ?? []} events={result.items ?? []} />
           <Table

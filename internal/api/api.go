@@ -41,7 +41,79 @@ func New(st *store.Store, jobs *job.Manager, sched *job.Scheduler, cfg config.Co
 	}
 	srv.Watch.OnEvents = srv.pushFuturesAlerts // 系统级提醒：飞书 / 本机通知
 	_ = srv.applyFuturesBlacklist()            // 重启后黑名单仍然生效
+	srv.restoreFuturesWatch()                  // 重启后按上次的配置自动恢复监控（默认开启）
 	return srv
+}
+
+// loadFuturesWatchConfig 读已保存的监控配置；没保存过或数据坏了 → 默认配置。
+// 页面上「参数填了又没了」的根因就是它以前只活在内存里，现在落到 SQLite。
+func (s *Server) loadFuturesWatchConfig() futures.WatchConfig {
+	raw, ok, err := s.Store.LoadFuturesWatchConfig()
+	if err != nil || !ok {
+		return futures.DefaultWatchConfig()
+	}
+	var cfg futures.WatchConfig
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return futures.DefaultWatchConfig() // 脏数据退回默认，别让页面打不开
+	}
+	return futures.NormalizeWatchConfig(cfg)
+}
+
+// saveFuturesWatchConfig 保存监控配置。enabled 以监控器实际的运行状态为准，
+// 不信任前端传值（前端漏传会把「默认开启」写坏）。
+func (s *Server) saveFuturesWatchConfig(cfg futures.WatchConfig) error {
+	cfg = futures.NormalizeWatchConfig(cfg)
+	cfg.Enabled = s.Watch.Status().Running
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	return s.Store.SaveFuturesWatchConfig(raw)
+}
+
+// restoreFuturesWatch 启动时按上次保存的配置恢复监控（默认开启）。
+// 恢复失败不该让服务起不来：把原因写进状态提示，页面上看得见。
+func (s *Server) restoreFuturesWatch() {
+	cfg := s.loadFuturesWatchConfig()
+	if !cfg.Enabled {
+		return // 上次是用户主动停的，不要自作主张开起来
+	}
+	if _, err := s.Watch.Start(cfg); err != nil {
+		s.Watch.SetAlertNote("自动恢复监控失败：" + err.Error())
+	}
+}
+
+func (s *Server) futuresWatchConfigGet(w http.ResponseWriter, _ *http.Request) {
+	writeOK(w, s.loadFuturesWatchConfig())
+}
+
+// futuresWatchConfigSave 保存配置：没在跑就只存起来，在跑就立刻热生效。
+// 它不会「顺手启动」监控（要启动用 /watch/start），语义清晰点不容易踩坑。
+func (s *Server) futuresWatchConfigSave(w http.ResponseWriter, r *http.Request) {
+	var cfg futures.WatchConfig
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&cfg); err != nil {
+		writeErr(w, http.StatusBadRequest, "无效 JSON")
+		return
+	}
+	cfg = futures.NormalizeWatchConfig(cfg)
+	if s.Watch.Status().Running {
+		st, err := s.Watch.Start(cfg) // 运行中 → 立即生效
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err := s.saveFuturesWatchConfig(st.Config); err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeOK(w, st)
+		return
+	}
+	if err := s.saveFuturesWatchConfig(cfg); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeOK(w, s.Watch.Status())
 }
 
 // normalizeBlacklistInput 校验并规整黑名单入参。
@@ -235,7 +307,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/futures/backtest", s.futuresBacktest)
 	mux.HandleFunc("POST /api/futures/sweep", s.futuresSweep)
 	mux.HandleFunc("POST /api/futures/watch/start", s.futuresWatchStart)
-	mux.HandleFunc("POST /api/futures/watch/config", s.futuresWatchStart)
+	mux.HandleFunc("GET /api/futures/watch/config", s.futuresWatchConfigGet)
+	mux.HandleFunc("POST /api/futures/watch/config", s.futuresWatchConfigSave)
 	mux.HandleFunc("POST /api/futures/watch/stop", s.futuresWatchStop)
 	mux.HandleFunc("GET /api/futures/watch/status", s.futuresWatchStatus)
 	mux.HandleFunc("GET /api/futures/watch/events", s.futuresWatchEvents)
@@ -762,11 +835,18 @@ func (s *Server) futuresWatchStart(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	_ = s.saveFuturesWatchConfig(st.Config) // 记住这套配置（enabled=true → 重启后自动开）
 	writeOK(w, st)
 }
 
 func (s *Server) futuresWatchStop(w http.ResponseWriter, _ *http.Request) {
-	writeOK(w, s.Watch.Stop())
+	// 停止只翻转「开着没开着」，参数一律以库里保存的为准：
+	// 拿监控器里「上次运行时的配置」去覆盖，会把用户刚保存的新参数打回去（踩过）。
+	cfg := s.loadFuturesWatchConfig()
+	s.Watch.Stop()
+	// 此时 Running 已是 false → saveFuturesWatchConfig 会把 enabled 写成 false
+	_ = s.saveFuturesWatchConfig(cfg)
+	writeOK(w, s.Watch.Status())
 }
 
 func (s *Server) futuresWatchStatus(w http.ResponseWriter, _ *http.Request) {
@@ -813,6 +893,11 @@ func (s *Server) futuresBacktest(w http.ResponseWriter, r *http.Request) {
 	var p futures.Params
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&p); err != nil {
 		writeErr(w, http.StatusBadRequest, "无效 JSON")
+		return
+	}
+	// 时间范围等参数错误要当 400（别让用户以为是数据源故障）
+	if err := futures.ValidateBacktestParams(p); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	// 本地 SQLite 优先（futures-sync 灌过就有），缺数据才走多源网络并回写

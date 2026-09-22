@@ -51,9 +51,20 @@ func BacktestBars(minutes []Bar, daily []Daily, p Params) Result {
 		return out
 	}
 	v, _ := VarietyOfSymbol(p.Symbol) // 取品种码：止损/止盈要按它的报价单位对齐
+	from, to, fromText, toText := backtestRange(p)
+	out.From, out.To = fromText, toText
+	fromDay, toDay := truncateDate(from), truncateDate(to)
+
 	days := realSessionDays(minutes)
 	var items []Outcome
 	for _, day := range days {
+		// 按「信号所在交易日」先粗筛（指标仍在全量序列上算，不受范围影响）
+		if !from.IsZero() && day.Before(fromDay) {
+			continue
+		}
+		if !to.IsZero() && day.After(toDay) {
+			continue
+		}
 		levels := PivotLevels(daily, day)
 		if p.Period == "5" {
 			if orb := ORBLevels(minutes, day, p.ORB); len(orb) > 0 {
@@ -61,6 +72,7 @@ func BacktestBars(minutes []Bar, daily []Daily, p Params) Result {
 			}
 		}
 		ev := ScanTimeframe(minutes, day, levels, p)
+		ev = filterEventsByRange(ev, from, to)
 		got, skipped := evaluate(ev, minutes, v.Prefix, p)
 		items = append(items, got...)
 		out.SkippedEOD += skipped
@@ -68,6 +80,76 @@ func BacktestBars(minutes []Bar, daily []Daily, p Params) Result {
 	fillStats(&out, items)
 	out.Bars = klineBars(minutes)
 	return out
+}
+
+// parseRangeTime 宽松解析起止时间：支持 "2006-01-02"、"2006-01-02 15:04"、RFC3339。
+// 解析不了就返回 false（调用方按「不限」处理，不因为一个手滑的输入把回测打成 0 笔）。
+func parseRangeTime(raw string) (time.Time, bool) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return time.Time{}, false
+	}
+	layouts := []string{
+		"2006-01-02 15:04:05", "2006-01-02 15:04",
+		"2006-01-02T15:04:05Z07:00", "2006-01-02T15:04:05", "2006-01-02",
+	}
+	for _, l := range layouts {
+		if t, err := time.ParseInLocation(l, s, locCST); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
+}
+
+// backtestRange 解析回测范围。只给日期时：起始补 00:00、结束补 23:59（当天整天算在范围内）。
+func backtestRange(p Params) (from, to time.Time, fromText, toText string) {
+	if t, ok := parseRangeTime(p.From); ok {
+		from = t
+		fromText = t.In(locCST).Format("2006-01-02 15:04")
+	}
+	if t, ok := parseRangeTime(p.To); ok {
+		to = t
+		if len(strings.TrimSpace(p.To)) <= len("2006-01-02") {
+			to = time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 0, 0, locCST)
+		}
+		toText = to.In(locCST).Format("2006-01-02 15:04")
+	}
+	return from, to, fromText, toText
+}
+
+// filterEventsByRange 按信号时间过滤（含边界）；两端都为空则原样返回。
+func filterEventsByRange(ev []Event, from, to time.Time) []Event {
+	if from.IsZero() && to.IsZero() {
+		return ev
+	}
+	out := make([]Event, 0, len(ev))
+	for _, e := range ev {
+		if !from.IsZero() && e.Time.Before(from) {
+			continue
+		}
+		if !to.IsZero() && e.Time.After(to) {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// ValidateBacktestParams 校验时间范围，供上层把参数错误区分成 400。
+func ValidateBacktestParams(p Params) error {
+	for _, raw := range []string{p.From, p.To} {
+		if strings.TrimSpace(raw) == "" {
+			continue
+		}
+		if _, ok := parseRangeTime(raw); !ok {
+			return fmt.Errorf("无法解析时间 %q（可用 2006-01-02 或 2006-01-02 15:04）", raw)
+		}
+	}
+	from, to, _, _ := backtestRange(p)
+	if !from.IsZero() && !to.IsZero() && from.After(to) {
+		return fmt.Errorf("起始时间 %s 不能晚于结束时间 %s", from.Format("2006-01-02 15:04"), to.Format("2006-01-02 15:04"))
+	}
+	return nil
 }
 
 // fillStats 汇总统计：胜率 / 平均收益 / 盈利因子 / 期望 R / 出场分布。

@@ -148,7 +148,10 @@ CREATE TABLE IF NOT EXISTS app_meta (
 	if _, err := s.db.Exec(futuresDDL); err != nil {
 		return err
 	}
-	_, err := s.db.Exec(futuresBlacklistDDL)
+	if _, err := s.db.Exec(futuresBlacklistDDL); err != nil {
+		return err
+	}
+	_, err := s.db.Exec(futuresWatchConfigDDL)
 	return err
 }
 
