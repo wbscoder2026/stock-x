@@ -50,16 +50,20 @@ var sweepAllowedPeriods = []string{"5", "15", "30", "60", "120"}
 
 // SweepRequest 参数扫描请求：每个字段是一组候选值，空 = 用默认值（单组合）。
 type SweepRequest struct {
-	Symbol      string    `json:"symbol"`
-	Period      string    `json:"period"`  // 基准级别（Periods 为空时用它）
-	Periods     []string  `json:"periods"` // 级别也作为轴：每个级别各自取数
-	ORB         []int     `json:"orb"`
-	Donchian    []int     `json:"donchian"`
-	ATRPeriod   []int     `json:"atr_period"`
-	ATRK        []float64 `json:"atr_k"`
-	VolRatio    []float64 `json:"vol_ratio"`
-	HoldBars    []int     `json:"hold_bars"`
-	StopATR     []float64 `json:"stop_atr"`
+	Symbol    string    `json:"symbol"`
+	Period    string    `json:"period"`  // 基准级别（Periods 为空时用它）
+	Periods   []string  `json:"periods"` // 级别也作为轴：每个级别各自取数
+	ORB       []int     `json:"orb"`
+	Donchian  []int     `json:"donchian"`
+	ATRPeriod []int     `json:"atr_period"`
+	ATRK      []float64 `json:"atr_k"`
+	VolRatio  []float64 `json:"vol_ratio"`
+	HoldBars  []int     `json:"hold_bars"`
+	StopATR   []float64 `json:"stop_atr"`
+	// StopModes 止损方式候选（atr / prev_low）——「对照策略」就靠这根轴：
+	// 同一段行情、同一套参数，一次跑出两种止损方式直接比。
+	StopModes   []string  `json:"stop_modes"`
+	StopPoints  []float64 `json:"stop_points"`  // prev_low 的缓冲点数
 	NoOvernight []int     `json:"no_overnight"` // 0 = 允许隔夜，1 = 日内策略（可作为筛选轴）
 	From        string    `json:"from"`         // 时间范围筛选（对每个组合都生效，不是轴）
 	To          string    `json:"to"`
@@ -168,6 +172,12 @@ func normalizeSweep(req SweepRequest) (SweepRequest, error) {
 	req.VolRatio = floatAxis(req.VolRatio, d.VolRatio)
 	req.HoldBars = intAxis(req.HoldBars, d.HoldBars)
 	req.StopATR = floatAxis(req.StopATR, d.StopATR)
+	modes, err := normalizeStopModes(req.StopModes, d.StopMode)
+	if err != nil {
+		return req, err
+	}
+	req.StopModes = modes
+	req.StopPoints = floatAxis(req.StopPoints, d.StopPoints)
 	req.NoOvernight = flagAxis(req.NoOvernight, boolToFlag(d.NoOvernight))
 	req.RR = floatAxis(req.RR, d.RR)
 
@@ -175,6 +185,7 @@ func normalizeSweep(req SweepRequest) (SweepRequest, error) {
 	for _, size := range []int{
 		len(req.ORB), len(req.Donchian), len(req.ATRPeriod), len(req.ATRK),
 		len(req.VolRatio), len(req.HoldBars), len(req.StopATR), len(req.NoOvernight), len(req.RR),
+		len(req.StopModes), len(req.StopPoints),
 	} {
 		per *= size
 	}
@@ -183,6 +194,35 @@ func normalizeSweep(req SweepRequest) (SweepRequest, error) {
 			total, req.Limit, len(req.Periods), per, sweepMaxAxis)
 	}
 	return req, nil
+}
+
+// normalizeStopModes 止损方式候选值：空 → 用默认；非法值直接报错
+// （不能静默当 atr 跑，否则用户以为在对照，其实两边同一条策略）。
+func normalizeStopModes(vals []string, def string) ([]string, error) {
+	if len(vals) == 0 {
+		return []string{normalizeStopMode(def)}, nil
+	}
+	if len(vals) > sweepMaxAxis {
+		return nil, fmt.Errorf("止损方式最多 %d 个候选", sweepMaxAxis)
+	}
+	seen := map[string]bool{}
+	out := make([]string, 0, len(vals))
+	for _, raw := range vals {
+		v := strings.TrimSpace(raw)
+		if v == "" {
+			v = def
+		}
+		if !IsValidStopMode(v) {
+			return nil, fmt.Errorf("未知止损方式 %q（可选：%s / %s）", raw, StopModeATR, StopModePrevLow)
+		}
+		n := normalizeStopMode(v)
+		if seen[n] {
+			continue
+		}
+		seen[n] = true
+		out = append(out, n)
+	}
+	return out, nil
 }
 
 // normalizePeriods 级别去重升序 + 白名单校验；空 → 用基准级别。
@@ -339,6 +379,7 @@ func sweepCombos(p SweepRequest) []Params {
 		{p.VolRatio, func(pp *Params, v float64) { pp.VolRatio = v }},
 		{toF(p.HoldBars), func(pp *Params, v float64) { pp.HoldBars = int(v) }},
 		{p.StopATR, func(pp *Params, v float64) { pp.StopATR = v }},
+		{p.StopPoints, func(pp *Params, v float64) { pp.StopPoints = v }},
 		{toF(p.NoOvernight), func(pp *Params, v float64) { pp.NoOvernight = v > 0 }},
 		{p.RR, func(pp *Params, v float64) { pp.RR = v }},
 	}
@@ -349,6 +390,18 @@ func sweepCombos(p SweepRequest) []Params {
 			for _, v := range a.vals {
 				cp := cur
 				a.set(&cp, v)
+				next = append(next, cp)
+			}
+		}
+		out = next
+	}
+	// 止损方式是字符串轴，单独展开（数值轴那套塞不进去）
+	if len(p.StopModes) > 0 {
+		next := make([]Params, 0, len(out)*len(p.StopModes))
+		for _, cur := range out {
+			for _, m := range p.StopModes {
+				cp := cur
+				cp.StopMode = m
 				next = append(next, cp)
 			}
 		}

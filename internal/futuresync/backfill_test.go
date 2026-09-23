@@ -55,7 +55,7 @@ func TestBackfillPagesBackwardAndStores(t *testing.T) {
 		},
 	}
 	v := mustVariety(t, "JM")
-	b := NewBackfiller(st, NewBarCache(), src)
+	b := NewBackfiller(st, newTestCache(), src)
 	b.Pace = time.Millisecond
 	b.SetVarieties([]futures.Variety{v})
 
@@ -100,7 +100,7 @@ func TestBackfillPauseResume(t *testing.T) {
 		baseSource: &baseSource{name: "em"},
 		by:         map[string][]futures.Bar{"latest": {barAt(21, 10, 0, 10)}},
 	}
-	b := NewBackfiller(st, NewBarCache(), src)
+	b := NewBackfiller(st, newTestCache(), src)
 	b.Pace = time.Millisecond
 	b.SetVarieties([]futures.Variety{mustVariety(t, "JM")})
 	if err := b.Pause(); err != nil {
@@ -145,7 +145,7 @@ func TestBackfillManualRangeStopsAtFrom(t *testing.T) {
 			"2026-09-20": {barAt(18, 10, 0, 8)},
 		},
 	}
-	b := NewBackfiller(st, NewBarCache(), src)
+	b := NewBackfiller(st, newTestCache(), src)
 	b.Pace = time.Millisecond
 	b.SetVarieties([]futures.Variety{})
 	from := time.Date(2026, 9, 21, 0, 0, 0, 0, cst)

@@ -38,6 +38,12 @@ type MinuteRangeSource interface {
 	MinuteRange(ctx context.Context, v Variety, period string, end time.Time, limit int) ([]Bar, error)
 }
 
+// MinuteRangeSymbolSource 按「合约代码」翻分钟线：主连 JM0 和月份合约 JM2601 都走它。
+// 补全页面要能补具体月份合约，光有品种级别（MinuteRange）不够。
+type MinuteRangeSymbolSource interface {
+	MinuteRangeSymbol(ctx context.Context, symbol, period string, end time.Time, limit int) ([]Bar, error)
+}
+
 // ---------------------------------------------------------------- 多源容错
 
 // SourceStatus 各数据源健康度
@@ -229,6 +235,28 @@ func (m *MultiSource) MinuteRange(ctx context.Context, v Variety, period string,
 	})
 }
 
+// MinuteRangeSymbol 按合约代码翻分钟线：只委托给支持它的源（目前只有东财）。
+func (m *MultiSource) MinuteRangeSymbol(ctx context.Context, symbol, period string, end time.Time, limit int) ([]Bar, error) {
+	v, ok := VarietyOfSymbol(symbol)
+	if !ok {
+		return nil, fmt.Errorf("未知合约 %s", symbol)
+	}
+	return fetch(m, v, func(src BarSource) ([]Bar, error) {
+		rs, ok := src.(MinuteRangeSymbolSource)
+		if !ok {
+			return nil, errSourceNotApplicable
+		}
+		bars, err := rs.MinuteRangeSymbol(ctx, symbol, period, end, limit)
+		if err != nil {
+			return nil, err
+		}
+		if err := checkBarScale(v.Prefix, barCloses(bars)); err != nil {
+			return nil, err // 脏数据算失败 → 降级到下一个源
+		}
+		return bars, nil
+	})
+}
+
 func (m *MultiSource) Minute(ctx context.Context, v Variety, period string) ([]Bar, error) {
 	return fetch(m, v, func(src BarSource) ([]Bar, error) {
 		bars, err := src.Minute(ctx, v, period)
@@ -370,6 +398,34 @@ func eastmoneySecid(v Variety) (string, bool) {
 	return fmt.Sprintf("%d.%sm", market, code), true
 }
 
+// eastmoneySecidOf 代码 → 东财 secid：主连 JM0 → 114.jmm，月份合约 JM2601 → 114.jm2601。
+func eastmoneySecidOf(symbol string) (string, bool) {
+	sym := strings.ToLower(strings.TrimSpace(symbol))
+	if sym == "" {
+		return "", false
+	}
+	v, ok := VarietyOfSymbol(sym)
+	if !ok {
+		return "", false
+	}
+	market, ok := eastmoneyMarkets[v.Exchange]
+	if !ok {
+		return "", false
+	}
+	code := strings.ToLower(strings.TrimSpace(v.Prefix))
+	if code == "" {
+		return "", false
+	}
+	rest := strings.TrimPrefix(sym, code)
+	if rest == "" {
+		return "", false
+	}
+	if isMain(sym) {
+		rest = "m" // 主连在东财是「品种字母 + m」
+	}
+	return fmt.Sprintf("%d.%s%s", market, code, rest), true
+}
+
 func eastmoneyKlt(period string) (int, error) {
 	switch strings.TrimSpace(period) {
 	case "1", "5", "15", "30", "60", "120":
@@ -397,6 +453,20 @@ func (e *EastmoneySource) MinuteRange(ctx context.Context, v Variety, period str
 	if !ok {
 		return nil, fmt.Errorf("东财不支持 %s", v.Prefix)
 	}
+	return e.minuteRangeBySecid(ctx, secid, period, end, limit)
+}
+
+// MinuteRangeSymbol 按合约代码翻分钟线（主连 JM0 / 月份合约 JM2601 都行）。
+func (e *EastmoneySource) MinuteRangeSymbol(ctx context.Context, symbol, period string, end time.Time, limit int) ([]Bar, error) {
+	secid, ok := eastmoneySecidOf(symbol)
+	if !ok {
+		return nil, fmt.Errorf("东财不支持 %s", symbol)
+	}
+	return e.minuteRangeBySecid(ctx, secid, period, end, limit)
+}
+
+// minuteRangeBySecid 上面两个入口的公共主体。
+func (e *EastmoneySource) minuteRangeBySecid(ctx context.Context, secid, period string, end time.Time, limit int) ([]Bar, error) {
 	klt, err := eastmoneyKlt(period)
 	if err != nil {
 		return nil, err
@@ -434,7 +504,7 @@ func (e *EastmoneySource) MinuteRange(ctx context.Context, v Variety, period str
 		})
 	}
 	if len(out) == 0 {
-		return nil, fmt.Errorf("东财 %s 无数据", v.Prefix)
+		return nil, fmt.Errorf("东财 %s 无数据", secid)
 	}
 	return out, nil
 }

@@ -228,6 +228,7 @@ func klineBars(minutes []Bar) []KlineBar {
 //
 // 返回值第二项是「因禁止隔夜被跳过」的信号数。
 func evaluate(ev []Event, bars []Bar, prefix string, p Params) ([]Outcome, int) {
+	p = mergeParams(p) // 止损方式 / 点数 / 倍数可能是零值，统一补默认
 	hold := p.HoldBars
 	if hold <= 0 {
 		hold = 6
@@ -245,7 +246,16 @@ func evaluate(ev []Event, bars []Bar, prefix string, p Params) ([]Outcome, int) 
 		}
 		up := e.Direction != DirDown
 		entry := e.Close
-		stop, tp := RecommendPrices(prefix, e.Direction, entry, e.ATR, p.StopATR, p.RR)
+		// prev_low 模式要「前一根」：事件里没带（老数据）就从 K 线序列补
+		prevLow, prevHigh := e.PrevLow, e.PrevHigh
+		if (prevLow <= 0 || prevHigh <= 0) && i > 0 {
+			prevLow, prevHigh = bars[i-1].Low, bars[i-1].High
+		}
+		stop, tp := RecommendStop(StopInput{
+			Prefix: prefix, Direction: e.Direction, Entry: entry, ATR: e.ATR,
+			PrevLow: prevLow, PrevHigh: prevHigh,
+			StopMode: p.StopMode, StopATR: p.StopATR, StopPoints: p.StopPoints, RR: p.RR,
+		})
 		tick := TickSize(prefix)
 
 		complete := i+hold < len(bars) // 数据够走完持有周期
@@ -320,7 +330,8 @@ func evaluate(ev []Event, bars []Bar, prefix string, p Params) ([]Outcome, int) 
 			Close: entry, Volume: e.Volume, LevelPrice: e.LevelPrice,
 			ExitTime:  bars[exitIdx].Time.In(locCST).Format("2006-01-02 15:04"),
 			ExitPrice: exitPrice, Return: ret, Correct: ret > 0,
-			ExitReason: reason, StopPrice: stop, TPPrice: tp, R: r, StopATR: p.StopATR, TickSize: tick,
+			ExitReason: reason, StopPrice: stop, TPPrice: tp, R: r, StopATR: effectiveStopATR(p.StopATR),
+			TickSize: tick, StopMode: normalizeStopMode(p.StopMode), StopPoints: effectiveStopPoints(p.StopPoints),
 		})
 	}
 	return out, skipped

@@ -93,6 +93,7 @@ export type FuturesLocalPeriod = {
   bars: number
   first: string
   last: string
+  days?: number // 覆盖了多少天（判断同步到什么程度比「根数」直观）
 }
 
 export type FuturesLocalVariety = {
@@ -100,6 +101,49 @@ export type FuturesLocalVariety = {
   name: string
   symbol: string
   periods: FuturesLocalPeriod[]
+  contracts?: FuturesContractSpan[] // 该品种已同步的月份合约（不含主连）
+}
+
+export type FuturesContractSpan = {
+  symbol: string // JM2601
+  label: string // 2601
+  periods: number
+  days: number
+}
+
+export type FuturesMonthGroup = {
+  month: string // 2026-09
+  days: number
+  bars: number
+  missing?: string[]
+}
+
+export type FuturesLocalDetail = {
+  prefix: string
+  name: string
+  symbol: string
+  minute_synced: boolean // 有没有 1 分钟级别的数据
+  minute_days: number // 1 分钟覆盖了多少天
+  minute_first: string
+  minute_last: string
+  periods: FuturesPeriodDetail[]
+}
+
+export type FuturesPeriodDetail = {
+  period: string
+  is_minute: boolean
+  bars: number
+  first: string
+  last: string
+  days: FuturesDayDetail[]
+  months: FuturesMonthGroup[] // 二级分类：月份 → 日期
+  missing?: string[] // 首末之间工作日却没数据的日期（可能是节假日）
+}
+
+export type FuturesDayDetail = {
+  day: string
+  bars: number
+  weekday: string
 }
 
 export type FuturesBackfillStatus = {
@@ -115,6 +159,13 @@ export type FuturesBackfillStatus = {
   saved: number
   message: string
   queued: number
+  done?: number // 当前品种已翻页数
+  total?: number // 当前品种计划翻页数
+  round_idx?: number // 本轮第几个品种
+  round_all?: number // 本轮共几个品种
+  percent?: number // 0~100
+  started_at?: number
+  elapsed_sec?: number
 }
 
 export type FuturesMemoryView = {
@@ -199,6 +250,8 @@ export type FuturesParams = {
   vol_ratio?: number
   hold_bars?: number
   stop_atr?: number
+  stop_mode?: string // atr | prev_low
+  stop_points?: number
   no_overnight?: boolean
   from?: string
   to?: string
@@ -247,6 +300,8 @@ export type FuturesWatchEvent = {
   tp_price: number
   rr: number
   stop_atr: number
+  stop_mode?: string
+  stop_points?: number
   tick_size: number
 }
 
@@ -288,6 +343,8 @@ export type FuturesOutcome = FuturesEvent & {
   tp_price: number
   r_multiple: number
   stop_atr: number
+  stop_mode?: string
+  stop_points?: number
   tick_size: number
 }
 
@@ -303,6 +360,8 @@ export type FuturesSweepRequest = {
   vol_ratio?: number[]
   hold_bars?: number[]
   stop_atr?: number[]
+  stop_modes?: string[]
+  stop_points?: number[]
   no_overnight?: number[]
   from?: string
   to?: string

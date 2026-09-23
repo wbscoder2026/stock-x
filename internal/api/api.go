@@ -311,6 +311,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/futures/favorites/delete", s.futuresFavoritesDelete)
 	mux.HandleFunc("POST /api/futures/favorites/scan", s.futuresFavoritesScan)
 	mux.HandleFunc("GET /api/futures/local", s.futuresLocal)
+	mux.HandleFunc("GET /api/futures/local/detail", s.futuresLocalDetail)
 	mux.HandleFunc("POST /api/futures/local/backfill", s.futuresLocalBackfill)
 	mux.HandleFunc("POST /api/futures/local/pause", s.futuresLocalPause)
 	mux.HandleFunc("POST /api/futures/local/resume", s.futuresLocalResume)
@@ -879,7 +880,10 @@ func (s *Server) futuresWatchAlertTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 样例带上推荐价，让用户直接看到真实提醒的格式
-	stop, tp := futures.RecommendPrices("JM", "向上突破", 1523, 12, 1, futures.DefaultRR)
+	stop, tp := futures.RecommendStop(futures.StopInput{
+		Prefix: "JM", Direction: "向上突破", Entry: 1523, ATR: 12,
+		StopMode: futures.StopModeATR, StopATR: 1, RR: futures.DefaultRR,
+	})
 	events := []futures.WatchEvent{{
 		Fresh: true, Time: time.Now().In(futures.CSTZone()).Format("2006-01-02 15:04"),
 		Symbol: "JM0", Prefix: "JM", Name: "焦煤",

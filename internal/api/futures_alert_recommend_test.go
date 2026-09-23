@@ -50,7 +50,10 @@ func TestFuturesAlertMessageWithoutRecommendation(t *testing.T) {
 
 func TestFuturesWatchAlertTestIncludesAdvice(t *testing.T) {
 	// 「测试提醒」发出的样例会带上真实格式的推荐价
-	stop, tp := futures.RecommendPrices("JM", "向上突破", 1523, 12, 1, futures.DefaultRR)
+	stop, tp := futures.RecommendStop(futures.StopInput{
+		Prefix: "JM", Direction: "向上突破", Entry: 1523, ATR: 12,
+		StopMode: futures.StopModeATR, StopATR: 1, RR: futures.DefaultRR,
+	})
 	if stop != 1511 || tp != 1541 {
 		t.Fatalf("样例子计算不对：stop=%v tp=%v", stop, tp)
 	}

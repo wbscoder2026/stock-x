@@ -112,19 +112,19 @@ func TestFormatPrice(t *testing.T) {
 func TestRecommendPricesAlignsToVarietyTick(t *testing.T) {
 	// 焦煤 tick=0.5：现价 1234，ATR 12.3，盈亏比 1.5
 	// 止损 = 1234 − 12.3 = 1221.7 → 1221.5；止盈 = 1234 + 18.45 = 1252.45 → 1252.5
-	stop, tp := RecommendPrices("JM", DirUp, 1234, 12.3, 1, 1.5)
+	stop, tp := RecommendStop(StopInput{Prefix: "JM", Direction: DirUp, Entry: 1234, ATR: 12.3, StopATR: 1, RR: 1.5, StopMode: StopModeATR})
 	if stop != 1221.5 || tp != 1252.5 {
 		t.Fatalf("焦煤推荐价没对齐 0.5：stop=%v tp=%v", stop, tp)
 	}
 
 	// 螺纹钢 tick=1：现价 3456，ATR 40 → 止损 3416，止盈 3516（整数）
-	stop, tp = RecommendPrices("RB", DirUp, 3456, 40, 1, 1.5)
+	stop, tp = RecommendStop(StopInput{Prefix: "RB", Direction: DirUp, Entry: 3456, ATR: 40, StopATR: 1, RR: 1.5, StopMode: StopModeATR})
 	if stop != 3416 || tp != 3516 {
 		t.Fatalf("螺纹钢推荐价应为整数：stop=%v tp=%v", stop, tp)
 	}
 
 	// 黄金 tick=0.02：结果必须落在 0.02 的整数倍上
-	stop, tp = RecommendPrices("AU", DirUp, 623.437, 5.016, 1, 1.5)
+	stop, tp = RecommendStop(StopInput{Prefix: "AU", Direction: DirUp, Entry: 623.437, ATR: 5.016, StopATR: 1, RR: 1.5, StopMode: StopModeATR})
 	for _, v := range []float64{stop, tp} {
 		if math.Abs(v/0.02-math.Round(v/0.02)) > 1e-6 {
 			t.Fatalf("黄金推荐价没对齐 0.02：stop=%v tp=%v", stop, tp)
@@ -132,7 +132,7 @@ func TestRecommendPricesAlignsToVarietyTick(t *testing.T) {
 	}
 
 	// 向下突破同样对齐
-	stop, tp = RecommendPrices("JM", DirDown, 1234, 12.3, 1, 1.5)
+	stop, tp = RecommendStop(StopInput{Prefix: "JM", Direction: DirDown, Entry: 1234, ATR: 12.3, StopATR: 1, RR: 1.5, StopMode: StopModeATR})
 	if stop != 1246.5 || tp != 1215.5 {
 		t.Fatalf("做空推荐价没对齐：stop=%v tp=%v", stop, tp)
 	}
@@ -141,11 +141,11 @@ func TestRecommendPricesAlignsToVarietyTick(t *testing.T) {
 func TestRecommendPricesKeepsOneTickDistance(t *testing.T) {
 	// ATR 比一个跳还小时（极端周期/异常数据），止损止盈至少要离入场价 1 个跳，
 	// 否则取整会把止损取到入场价上（等于没有止损）。
-	stop, tp := RecommendPrices("RB", DirUp, 100, 0.1, 1, 1.5)
+	stop, tp := RecommendStop(StopInput{Prefix: "RB", Direction: DirUp, Entry: 100, ATR: 0.1, StopATR: 1, RR: 1.5, StopMode: StopModeATR})
 	if stop != 99 || tp != 101 {
 		t.Fatalf("应保底 1 个跳：stop=%v tp=%v", stop, tp)
 	}
-	stop, tp = RecommendPrices("JM", DirDown, 100, 0.1, 1, 1.5)
+	stop, tp = RecommendStop(StopInput{Prefix: "JM", Direction: DirDown, Entry: 100, ATR: 0.1, StopATR: 1, RR: 1.5, StopMode: StopModeATR})
 	if stop != 100.5 || tp != 99.5 {
 		t.Fatalf("做空也应保底 1 个跳：stop=%v tp=%v", stop, tp)
 	}
@@ -156,7 +156,7 @@ func TestCollectNewCarriesTickSize(t *testing.T) {
 	ts := time.Date(2026, 9, 22, 9, 50, 0, 0, locCST)
 	got := collectNew(map[string]int64{}, []Event{
 		{Time: ts, Direction: DirUp, Level: "ORB高(开盘30分钟)", Close: 1234, ATR: 12.3},
-	}, time.Time{}, "2026-09-22", v, 1, 1.5)
+	}, time.Time{}, "2026-09-22", v, Params{StopATR: 1, RR: 1.5})
 	if len(got) != 1 {
 		t.Fatalf("应有 1 条：%+v", got)
 	}

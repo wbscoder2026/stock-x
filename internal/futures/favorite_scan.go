@@ -32,23 +32,23 @@ type SymbolStat struct {
 // 胜率/收益的「平均」是有成交品种的等权平均，用来看规则泛不泛用；
 // 「加权」按成交笔数，避免一个品种只有 1 笔就把等权平均带偏时无从对照。
 type ConfigScanSummary struct {
-	ID               int64        `json:"id"`
-	Name             string       `json:"name"`
-	Params           Params       `json:"params"`
-	Symbols          int          `json:"symbols"`
-	Covered          int          `json:"covered"`
-	Reliable         int          `json:"reliable"`
-	NoSample         int          `json:"no_sample"`
-	Failed           int          `json:"failed"`
-	TotalTrades      int          `json:"total_trades"`
-	TotalCorrect     int          `json:"total_correct"`
-	AvgWinRate       float64      `json:"avg_win_rate"`
-	AvgReturn        float64      `json:"avg_return"`
-	AvgR             float64      `json:"avg_r"`
-	AvgProfitFactor  float64      `json:"avg_profit_factor"`
-	PooledWinRate    float64      `json:"pooled_win_rate"`
-	PooledAvgReturn  float64      `json:"pooled_avg_return"`
-	Details          []SymbolStat `json:"details"`
+	ID              int64        `json:"id"`
+	Name            string       `json:"name"`
+	Params          Params       `json:"params"`
+	Symbols         int          `json:"symbols"`
+	Covered         int          `json:"covered"`
+	Reliable        int          `json:"reliable"`
+	NoSample        int          `json:"no_sample"`
+	Failed          int          `json:"failed"`
+	TotalTrades     int          `json:"total_trades"`
+	TotalCorrect    int          `json:"total_correct"`
+	AvgWinRate      float64      `json:"avg_win_rate"`
+	AvgReturn       float64      `json:"avg_return"`
+	AvgR            float64      `json:"avg_r"`
+	AvgProfitFactor float64      `json:"avg_profit_factor"`
+	PooledWinRate   float64      `json:"pooled_win_rate"`
+	PooledAvgReturn float64      `json:"pooled_avg_return"`
+	Details         []SymbolStat `json:"details"`
 }
 
 // OverallScan 多条配置放在一起看的总平均：每条规则一票（先各自按品种等权）。

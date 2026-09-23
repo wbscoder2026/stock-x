@@ -19,6 +19,11 @@ body {
   width: 100%;
 }
 
+/* 回测明细里被聚焦（图上画了止损止盈线）的那一行 */
+.row-active > td {
+  background: #fffbe6 !important;
+}
+
 .futures-chart {
   height: 420px;
   width: 100%;

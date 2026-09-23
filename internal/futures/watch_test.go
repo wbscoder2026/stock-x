@@ -128,7 +128,7 @@ func TestCollectNewDedupAndFresh(t *testing.T) {
 	t2 := t1.Add(5 * time.Minute)
 	first := []Event{{Time: t1, Direction: DirUp, Level: "ORB高(开盘30分钟)", Close: 102, LevelPrice: 100, Volume: 1000}}
 
-	got := collectNew(seen, first, time.Time{}, "2026-01-05", v, 1, DefaultRR)
+	got := collectNew(seen, first, time.Time{}, "2026-01-05", v, Params{StopATR: 1, RR: DefaultRR})
 	if len(got) != 1 {
 		t.Fatalf("首轮应报 1 条，实际 %+v", got)
 	}
@@ -139,12 +139,12 @@ func TestCollectNewDedupAndFresh(t *testing.T) {
 		t.Fatalf("事件字段不对 %+v", got[0])
 	}
 
-	if again := collectNew(seen, first, t1, "2026-01-05", v, 1, DefaultRR); len(again) != 0 {
+	if again := collectNew(seen, first, t1, "2026-01-05", v, Params{StopATR: 1, RR: DefaultRR}); len(again) != 0 {
 		t.Fatalf("同一根 K 线不该重复提醒 %+v", again)
 	}
 
 	next := []Event{{Time: t2, Direction: DirUp, Level: "ORB高(开盘30分钟)", Close: 103, LevelPrice: 100, Volume: 1200}}
-	fresh := collectNew(seen, next, t1, "2026-01-05", v, 1, DefaultRR)
+	fresh := collectNew(seen, next, t1, "2026-01-05", v, Params{StopATR: 1, RR: DefaultRR})
 	if len(fresh) != 1 || !fresh[0].Fresh {
 		t.Fatalf("新 K 线上的突破应标记 Fresh：%+v", fresh)
 	}

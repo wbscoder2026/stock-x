@@ -25,7 +25,18 @@ import type {
   FuturesWatchEvent,
   FuturesWatchStatus,
 } from '../types'
-import { DEFAULT_PARAMS, LEVEL_OPTIONS, ParamLabel, TIPS, fmtPrice, varietyOptions } from './FuturesShared'
+import {
+  DEFAULT_PARAMS,
+  LEVEL_OPTIONS,
+  ParamLabel,
+  STOP_MODE_ATR,
+  STOP_MODE_OPTIONS,
+  STOP_MODE_PREV_LOW,
+  TIPS,
+  fmtPrice,
+  stopModeLabel,
+  varietyOptions,
+} from './FuturesShared'
 
 // 提醒有时效：超过 TTL 的提醒自动从列表清除（时长可在页面上配，服务端下发值优先）
 const DEFAULT_ALERT_TTL_MIN = 30
@@ -41,6 +52,8 @@ function toWatchConfig(v: {
   atrK: number
   volRatio: number
   stopATR: number
+  stopMode: string
+  stopPoints: number
   rr: number
   interval: number
   prefixes: string[]
@@ -56,6 +69,8 @@ function toWatchConfig(v: {
     atr_k: v.atrK,
     vol_ratio: v.volRatio,
     stop_atr: v.stopATR,
+    stop_mode: v.stopMode,
+    stop_points: v.stopPoints,
     rr: v.rr,
     interval: v.interval,
     prefixes: v.prefixes,
@@ -98,7 +113,7 @@ const alertCols = (onBlacklist: (row: FuturesWatchEvent) => void): ColumnsType<F
     width: 110,
     render: (v: number, r) =>
       v ? (
-        <Tooltip title={`止损 ${r.stop_atr}×ATR，按报价单位 ${r.tick_size} 取整`}>
+        <Tooltip title={`止损 ${stopModeLabel(r.stop_mode, r.stop_points)}，按报价单位 ${r.tick_size} 取整`}>
           <span style={{ color: '#cf1322' }}>{fmtPrice(v, r.tick_size)}</span>
         </Tooltip>
       ) : (
@@ -155,6 +170,8 @@ export default function FuturesWatchPage() {
   const [atrK, setAtrK] = useState(DEFAULT_PARAMS.atrK)
   const [volRatio, setVolRatio] = useState(DEFAULT_PARAMS.volRatio)
   const [stopATR, setStopATR] = useState(DEFAULT_PARAMS.stopATR)
+  const [stopMode, setStopMode] = useState<string>(STOP_MODE_ATR)
+  const [stopPoints, setStopPoints] = useState(1)
   const [rr, setRr] = useState(DEFAULT_PARAMS.rr)
   const [watchPrefixes, setWatchPrefixes] = useState<string[]>([])
   const [watchInterval, setWatchInterval] = useState(30)
@@ -217,6 +234,8 @@ export default function FuturesWatchPage() {
         atrK,
         volRatio,
         stopATR,
+        stopMode,
+        stopPoints,
         rr,
         interval: watchInterval,
         prefixes: watchPrefixes,
@@ -224,7 +243,7 @@ export default function FuturesWatchPage() {
         desktop: alertDesktop,
         ttlMin: alertTTLMin,
       }),
-    [period, orb, donchian, atrPeriod, atrK, volRatio, stopATR, rr, watchInterval, watchPrefixes, alertFeishu, alertDesktop, alertTTLMin],
+    [period, orb, donchian, atrPeriod, atrK, volRatio, stopATR, stopMode, stopPoints, rr, watchInterval, watchPrefixes, alertFeishu, alertDesktop, alertTTLMin],
   )
   const configKey = useMemo(() => JSON.stringify(watchConfig), [watchConfig])
 
@@ -390,6 +409,8 @@ export default function FuturesWatchPage() {
         setAtrK(cfg.atr_k ?? DEFAULT_PARAMS.atrK)
         setVolRatio(cfg.vol_ratio ?? DEFAULT_PARAMS.volRatio)
         setStopATR(cfg.stop_atr ?? DEFAULT_PARAMS.stopATR)
+        setStopMode(cfg.stop_mode ?? STOP_MODE_ATR)
+        setStopPoints(cfg.stop_points ?? 1)
         setRr(cfg.rr ?? DEFAULT_PARAMS.rr)
         setWatchInterval(cfg.interval ?? 30)
         setWatchPrefixes(cfg.prefixes ?? [])
@@ -406,6 +427,8 @@ export default function FuturesWatchPage() {
             atrK: cfg.atr_k ?? DEFAULT_PARAMS.atrK,
             volRatio: cfg.vol_ratio ?? DEFAULT_PARAMS.volRatio,
             stopATR: cfg.stop_atr ?? DEFAULT_PARAMS.stopATR,
+            stopMode: cfg.stop_mode ?? STOP_MODE_ATR,
+            stopPoints: cfg.stop_points ?? 1,
             rr: cfg.rr ?? DEFAULT_PARAMS.rr,
             interval: cfg.interval ?? 30,
             prefixes: cfg.prefixes ?? [],
@@ -529,15 +552,30 @@ export default function FuturesWatchPage() {
           <Form.Item label={<ParamLabel text="量能倍数" hint={TIPS.vol_ratio} />}>
             <InputNumber min={0.5} step={0.1} value={volRatio} onChange={(v) => setVolRatio(Number(v ?? 1.5))} />
           </Form.Item>
-          <Form.Item label={<ParamLabel text="止损ATR" hint={TIPS.stop_atr} />}>
-            <InputNumber min={0.1} max={5} step={0.25} value={stopATR} onChange={(v) => setStopATR(Number(v ?? 1))} />
+          <Form.Item label={<ParamLabel text="止损方式" hint={TIPS.stop_mode} />}>
+            <Select style={{ width: 172 }} value={stopMode} onChange={setStopMode} options={STOP_MODE_OPTIONS} />
           </Form.Item>
+          {stopMode === STOP_MODE_PREV_LOW ? (
+            <Form.Item label={<ParamLabel text="止损点数" hint={TIPS.stop_points} />}>
+              <InputNumber
+                min={0.5}
+                max={20}
+                step={0.5}
+                value={stopPoints}
+                onChange={(v) => setStopPoints(Number(v ?? 1))}
+              />
+            </Form.Item>
+          ) : (
+            <Form.Item label={<ParamLabel text="止损ATR" hint={TIPS.stop_atr} />}>
+              <InputNumber min={0.1} max={5} step={0.25} value={stopATR} onChange={(v) => setStopATR(Number(v ?? 1))} />
+            </Form.Item>
+          )}
           <Form.Item label={<ParamLabel text="盈亏比" hint={TIPS.rr} />}>
             <InputNumber min={0.1} step={0.1} value={rr} onChange={(v) => setRr(Number(v ?? 1.5))} />
           </Form.Item>
           <Form.Item>
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-              提醒里的推荐止损（止损ATR × ATR）/ 推荐止盈（止损距离 × 盈亏比）用这些参数；运行中修改会自动生效
+              提醒里的推荐止损按上面选的「止损方式」算（ATR 倍数 / 前一根低高 ± 点数），止盈 = 止损距离 × 盈亏比；运行中修改会自动生效
             </Typography.Text>
           </Form.Item>
         </Form>

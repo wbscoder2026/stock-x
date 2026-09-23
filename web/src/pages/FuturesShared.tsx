@@ -1,12 +1,13 @@
 // 期货「回测」页与「监控」页共用：参数提示、图表、格式化工具、下拉选项。
 /* eslint-disable react/only-export-components -- 故意做成共享模块：这里既有图表组件，也有提示文案与格式化工具 */
-import { useEffect, useRef } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { Tag, Tooltip } from 'antd'
+import { Checkbox, Space, Tag, Tooltip, Typography } from 'antd'
 import {
   CandlestickSeries,
   ColorType,
   HistogramSeries,
+  LineSeries,
   createChart,
   createSeriesMarkers,
   type IChartApi,
@@ -17,7 +18,7 @@ import {
   type Time,
   type UTCTimestamp,
 } from 'lightweight-charts'
-import type { FuturesContract, FuturesEvent, FuturesKlineBar, FuturesLevel, FuturesVariety } from '../types'
+import type { FuturesContract, FuturesEvent, FuturesKlineBar, FuturesLevel, FuturesOutcome, FuturesVariety } from '../types'
 
 // ---------------------------------------------------------------- 参数提示（鼠标移到 ? 上）
 
@@ -121,9 +122,35 @@ export const TIPS: Record<string, ReactNode> = {
       <b>提醒的推荐价与「回测」里都用它</b>：回测中改这个值，止盈价与统计会立刻跟着变。不改变突破识别本身。
     </>
   ),
+  stop_mode: (
+    <>
+      <b>止损方式（两套对照策略）</b>
+      <br />
+      <b>ATR 倍数</b>（默认）：止损 = 入场 ∓ 止损ATR × ATR —— 跟随波动率，波动大的品种自动给更宽的止损。
+      <br />
+      <b>前一根低/高 + 点数</b>：做多止损 = <b>信号那根 K 线的前一根最低价 − 点数</b>；做空 = 前一根最高价 + 点数。
+      这是「结构止损」：破掉上一根的低点才算错，逻辑更贴近形态，止损点数随行情结构变化而不是随 ATR。
+      <br />
+      两者都用同一个盈亏比算止盈，所以可以直接扫描对照（扫描里「止损方式」是一根轴，一次跑出两种）。
+      <br />
+      前一根数据缺失时（例如当日第一根就突破）会自动退回 ATR 方式，不会把这一笔丢掉。
+    </>
+  ),
+  stop_points: (
+    <>
+      <b>前低/前高止损的缓冲点数（默认 1）</b>
+      <br />
+      1 点 = <b>1 个价格单位</b>（不是 1 个最小变动价位）：JM 一跳 0.5 → 1 点 = 2 跳；RB 一跳 1 → 1 点 = 1 跳；
+      AU 一跳 0.02 → 1 点 = 50 跳。
+      <br />
+      留缓冲是为了避开「刚好插一下就回去」：把止损放在前低之下 1~2 点，比放在前低上更不容易被扫。
+      <br />
+      结果仍会按品种最小变动价位对齐，并保底离入场价 1 个跳。
+    </>
+  ),
   stop_atr: (
     <>
-      <b>止损距离 = 该倍数 × ATR（默认 1）</b>
+      <b>止损距离 = 该倍数 × ATR（默认 1，仅「ATR 倍数」止损方式用）</b>
       <br />
       ATR 是平均波动幅度：<b>15 分钟级别通常占价格 0.1~0.4%，60 分钟约 0.3~0.9%</b>（实测 JM 15m 0.34% / 60m 0.90%，
       螺纹 15m 0.12% / 60m 0.29%）。所以大周期的止损点数天然是 2~3 倍，但换算成百分比仍在 1% 以内。
@@ -280,6 +307,16 @@ export function ParamLabel({ text, hint }: { text: string; hint: ReactNode }) {
 
 // ---------------------------------------------------------------- 常用选项
 
+// 止损方式（服务端 stop_mode 的取值）
+export const STOP_MODE_ATR = 'atr'
+export const STOP_MODE_PREV_LOW = 'prev_low'
+export const STOP_MODE_OPTIONS = [
+  { value: STOP_MODE_ATR, label: 'ATR 倍数' },
+  { value: STOP_MODE_PREV_LOW, label: '前一根低/高 + 点数' },
+]
+export const stopModeLabel = (mode?: string, points?: number) =>
+  mode === STOP_MODE_PREV_LOW ? `前低${points && points !== 1 ? `±${points}` : '−1'}点` : 'ATR'
+
 export const LEVEL_OPTIONS = [
   { value: '5', label: '5分钟' },
   { value: '15', label: '15分钟' },
@@ -360,14 +397,49 @@ function uniqueBars(bars: FuturesKlineBar[]) {
   return out
 }
 
+// 均线周期与配色（打开「均线」时画出）
+const MA_CONFIG = [
+  { period: 5, color: '#ef8c1b', label: 'MA5' },
+  { period: 10, color: '#8e44ad', label: 'MA10' },
+  { period: 20, color: '#2f7fc1', label: 'MA20' },
+]
+
+// sma 简单移动均线：前 n-1 根数据不足，不画点
+function sma(bars: FuturesKlineBar[], n: number): { time: UTCTimestamp; value: number }[] {
+  const out: { time: UTCTimestamp; value: number }[] = []
+  let sum = 0
+  for (let i = 0; i < bars.length; i++) {
+    sum += bars[i].close
+    if (i >= n) sum -= bars[i - n].close
+    if (i >= n - 1) out.push({ time: toBarTime(bars[i].time), value: sum / n })
+  }
+  return out
+}
+
+// 出场原因 → 标记配色（止盈绿 / 止损红 / 未触发灰）
+function exitColor(reason?: string) {
+  if (reason === '止盈') return '#26a69a'
+  if (reason === '止损') return '#ef5350'
+  return '#9e9e9e'
+}
+
+// FuturesChart K 线图 + 可开关的图层。
+// mode='trade'：买点/卖点标记（出场带 R 倍数），聚焦某一笔时画入场/止损/止盈三条价线。
+// mode='signal'：只标突破信号（按方向箭头 + 关键位名）。
 export function FuturesChart({
   bars,
   events,
   levels,
+  mode = 'signal',
+  focusIndex,
+  onFocus,
 }: {
   bars: FuturesKlineBar[]
   events: FuturesEvent[]
   levels?: FuturesLevel[]
+  mode?: 'signal' | 'trade'
+  focusIndex?: number
+  onFocus?: (index: number) => void
 }) {
   const wrapRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
@@ -375,6 +447,22 @@ export function FuturesChart({
   const volRef = useRef<ISeriesApi<'Histogram'> | null>(null)
   const markersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null)
   const linesRef = useRef<IPriceLine[]>([])
+  const maRefs = useRef<(ISeriesApi<'Line'> | null)[]>([])
+
+  const [showEntry, setShowEntry] = useState(true)
+  const [showExit, setShowExit] = useState(true)
+  const [showStopTP, setShowStopTP] = useState(true)
+  const [showMA, setShowMA] = useState(true)
+  const [showVol, setShowVol] = useState(true)
+  const [showLevels, setShowLevels] = useState(true)
+
+  // 点击回调只在挂载时订阅一次，所以用 ref 拿最新的 events / onFocus
+  const eventsRef = useRef(events)
+  const onFocusRef = useRef(onFocus)
+  useEffect(() => {
+    eventsRef.current = events
+    onFocusRef.current = onFocus
+  }, [events, onFocus])
 
   useEffect(() => {
     const el = wrapRef.current
@@ -398,12 +486,44 @@ export function FuturesChart({
       priceScaleId: 'vol',
     })
     chart.priceScale('vol').applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } })
+    maRefs.current = MA_CONFIG.map((m) =>
+      chart.addSeries(LineSeries, {
+        color: m.color,
+        lineWidth: 1,
+        priceLineVisible: false,
+        lastValueVisible: false,
+        crosshairMarkerVisible: false,
+      }),
+    )
     chartRef.current = chart
     candleRef.current = candle
     volRef.current = vol
     markersRef.current = createSeriesMarkers(candle, [])
+
+    // 点图上任意位置 → 聚焦最近的一笔（入场或出场时间 1 小时内）
+    chart.subscribeClick((param) => {
+      if (param.time === undefined || !onFocusRef.current) return
+      const clicked = Number(param.time)
+      let best = -1
+      let bestDiff = Number.POSITIVE_INFINITY
+      eventsRef.current.forEach((e, i) => {
+        const t = e as FuturesOutcome
+        const times = [Number(toBarTime(e.time)), t.exit_time ? Number(toBarTime(t.exit_time)) : Number.NaN]
+        for (const c of times) {
+          if (Number.isNaN(c)) continue
+          const d = Math.abs(c - clicked)
+          if (d < bestDiff) {
+            bestDiff = d
+            best = i
+          }
+        }
+      })
+      if (best >= 0 && bestDiff <= 3600) onFocusRef.current(best)
+    })
+
     return () => {
       linesRef.current = []
+      maRefs.current = []
       markersRef.current = null
       chart.remove()
       chartRef.current = null
@@ -412,11 +532,11 @@ export function FuturesChart({
     }
   }, [])
 
+  // 蜡烛 / 成交量 / 均线
   useEffect(() => {
-    const chart = chartRef.current
     const candle = candleRef.current
     const vol = volRef.current
-    if (!chart || !candle || !vol) return
+    if (!candle || !vol) return
     const list = uniqueBars(bars)
     candle.setData(
       list.map((b) => ({
@@ -434,35 +554,157 @@ export function FuturesChart({
         color: b.close >= b.open ? '#ef535088' : '#26a69a88',
       })),
     )
+    MA_CONFIG.forEach((m, i) => {
+      const series = maRefs.current[i]
+      if (!series) return
+      series.applyOptions({ visible: showMA })
+      series.setData(showMA ? sma(list, m.period) : [])
+    })
+    chartRef.current?.timeScale().fitContent()
+  }, [bars, showMA])
+
+  useEffect(() => {
+    volRef.current?.applyOptions({ visible: showVol })
+  }, [showVol])
+
+  // 买点 / 卖点 / 突破信号标记（必须按时间升序，否则 lightweight-charts 会乱序丢标记）
+  useEffect(() => {
     const marks: SeriesMarker<Time>[] = []
-    for (const e of events) {
-      const up = e.direction.includes('向上')
-      marks.push({
-        time: toBarTime(e.time),
-        position: up ? 'belowBar' : 'aboveBar',
-        color: up ? '#ef5350' : '#26a69a',
-        shape: up ? 'arrowUp' : 'arrowDown',
-        text: e.level,
+    if (showEntry) {
+      events.forEach((e) => {
+        const up = !e.direction.includes('向下')
+        marks.push({
+          time: toBarTime(e.time),
+          position: up ? 'belowBar' : 'aboveBar',
+          color: up ? '#ef5350' : '#26a69a',
+          shape: up ? 'arrowUp' : 'arrowDown',
+          text: mode === 'trade' ? (up ? '买' : '卖') : e.level,
+        })
       })
     }
+    if (mode === 'trade' && showExit) {
+      events.forEach((e) => {
+        const t = e as FuturesOutcome
+        if (!t.exit_time) return
+        const up = !e.direction.includes('向下')
+        const r = t.r_multiple ?? 0
+        marks.push({
+          time: toBarTime(t.exit_time),
+          position: up ? 'aboveBar' : 'belowBar',
+          color: exitColor(t.exit_reason),
+          shape: up ? 'arrowDown' : 'arrowUp',
+          text: `${r >= 0 ? '+' : ''}${r.toFixed(2)}R`,
+        })
+      })
+    }
+    marks.sort((a, b) => Number(a.time) - Number(b.time))
     markersRef.current?.setMarkers(marks)
+  }, [events, showEntry, showExit, mode])
+
+  // 关键位水平线 + 聚焦那一笔的入场/止损/止盈线
+  useEffect(() => {
+    const candle = candleRef.current
+    if (!candle) return
     for (const ln of linesRef.current) candle.removePriceLine(ln)
     linesRef.current = []
-    for (const lv of levels ?? []) {
-      linesRef.current.push(
-        candle.createPriceLine({
-          price: lv.value,
-          color: lv.kind === 'R' ? '#ef535099' : '#26a69a99',
-          lineWidth: 1,
-          lineStyle: 2,
-          axisLabelVisible: true,
-          title: lv.name,
-        }),
-      )
+
+    if (showLevels) {
+      for (const lv of levels ?? []) {
+        linesRef.current.push(
+          candle.createPriceLine({
+            price: lv.value,
+            color: lv.kind === 'R' ? '#ef535099' : '#26a69a99',
+            lineWidth: 1,
+            lineStyle: 2,
+            axisLabelVisible: true,
+            title: lv.name,
+          }),
+        )
+      }
     }
-    chart.timeScale().fitContent()
-  }, [bars, events, levels])
+
+    if (mode === 'trade' && showStopTP && focusIndex !== undefined) {
+      const t = events[focusIndex] as FuturesOutcome | undefined
+      if (t) {
+        const push = (price: number, color: string, title: string, style: 0 | 1 | 2 | 3 | 4) => {
+          if (!price || price <= 0) return
+          linesRef.current.push(
+            candle.createPriceLine({ price, color, lineWidth: 2, lineStyle: style, axisLabelVisible: true, title }),
+          )
+        }
+        push(t.close, '#607d8b', t.direction.includes('向下') ? '开空' : '开多', 1)
+        push(t.stop_price, '#ef5350', `止损(${stopModeLabel(t.stop_mode, t.stop_points)})`, 2)
+        push(t.tp_price, '#26a69a', '止盈', 2)
+      }
+    }
+  }, [levels, showLevels, events, focusIndex, showStopTP, mode])
+
+  const focusTrade = useMemo(
+    () =>
+      mode === 'trade' && focusIndex !== undefined ? (events[focusIndex] as FuturesOutcome | undefined) : undefined,
+    [mode, focusIndex, events],
+  )
 
   if (!bars.length) return null
-  return <div className="futures-chart" ref={wrapRef} />
+  return (
+    <div>
+      <Space size={14} wrap style={{ marginBottom: 6 }}>
+        <Checkbox checked={showEntry} onChange={(e) => setShowEntry(e.target.checked)}>
+          {mode === 'trade' ? '买点 / 卖点方向' : '突破信号'}
+        </Checkbox>
+        {mode === 'trade' ? (
+          <Checkbox checked={showExit} onChange={(e) => setShowExit(e.target.checked)}>
+            出场标记（R 倍数）
+          </Checkbox>
+        ) : null}
+        {mode === 'trade' ? (
+          <Tooltip
+            title={
+              focusIndex === undefined
+                ? '先在下方明细点一行（或点图上买点附近），再打开它'
+                : '把这一笔的入场价 / 止损价 / 止盈价画成横线'
+            }
+          >
+            <Checkbox
+              checked={showStopTP}
+              disabled={focusIndex === undefined}
+              onChange={(e) => setShowStopTP(e.target.checked)}
+            >
+              止损止盈线
+            </Checkbox>
+          </Tooltip>
+        ) : null}
+        <Checkbox checked={showMA} onChange={(e) => setShowMA(e.target.checked)}>
+          均线
+        </Checkbox>
+        {MA_CONFIG.map((m) => (
+          <span key={m.period} style={{ color: m.color, fontSize: 12, fontWeight: 600 }}>
+            {m.label}
+          </span>
+        ))}
+        <Checkbox checked={showVol} onChange={(e) => setShowVol(e.target.checked)}>
+          成交量
+        </Checkbox>
+        {levels?.length ? (
+          <Checkbox checked={showLevels} onChange={(e) => setShowLevels(e.target.checked)}>
+            关键位
+          </Checkbox>
+        ) : null}
+        {focusTrade ? (
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            已聚焦：{focusTrade.time} {focusTrade.direction} · {focusTrade.exit_reason}
+            {focusTrade.r_multiple
+              ? ` ${focusTrade.r_multiple >= 0 ? '+' : ''}${focusTrade.r_multiple.toFixed(2)}R`
+              : ''}
+            （再点一次取消）
+          </Typography.Text>
+        ) : mode === 'trade' ? (
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            点明细行或图上买点 → 聚焦单笔
+          </Typography.Text>
+        ) : null}
+      </Space>
+      <div className="futures-chart" ref={wrapRef} />
+    </div>
+  )
 }

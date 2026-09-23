@@ -11,6 +11,15 @@ import (
 	"github.com/wbscoder2026/stock-x/internal/store"
 )
 
+// newTestCache 测试用缓存：注入固定内存预算。
+// 缓存预算是按「空闲内存」算的，机器紧张时刚写入的序列会被立刻裁掉，
+// 会让「缓存里应该有」这类断言随机失败 —— 测试不该依赖跑测试的机器还剩多少内存。
+func newTestCache() *BarCache {
+	c := NewBarCache()
+	c.SetFreeMemory(func() uint64 { return 32 << 30 }) // 32G
+	return c
+}
+
 func cacheBar(symbol, period string, minute int, close float64) store.FuturesBar {
 	return store.FuturesBar{
 		Symbol: symbol, Period: period,
@@ -20,7 +29,7 @@ func cacheBar(symbol, period string, minute int, close float64) store.FuturesBar
 }
 
 func TestBarCacheFillAndMerge(t *testing.T) {
-	c := NewBarCache()
+	c := newTestCache()
 	symbol := "JM0"
 
 	if _, ok := c.Get(symbol, "5"); ok {
@@ -55,7 +64,7 @@ func TestPreloadThenReadSkipsDiskAndNetwork(t *testing.T) {
 	if _, err := st.UpsertFuturesBars([]store.FuturesBar{row}); err != nil {
 		t.Fatal(err)
 	}
-	cache := NewBarCache()
+	cache := newTestCache()
 	if err := Preload(st, cache); err != nil {
 		t.Fatal(err)
 	}
@@ -78,6 +87,7 @@ func TestStoredSourceKeepsWarmedSeriesInMemory(t *testing.T) {
 	st := openStore(t)
 	live := &baseSource{name: "live", minute: []futures.Bar{minuteBar(21, 0, 100)}}
 	src := NewStoredSource(st, live)
+	src.Cache.SetFreeMemory(func() uint64 { return 32 << 30 })
 	v := mustVariety(t, "RB")
 
 	if _, err := src.Minute(context.Background(), v, "5"); err != nil {
@@ -103,6 +113,7 @@ func TestStoredSourceLocalHitStaysInMemory(t *testing.T) {
 	}
 	live := &baseSource{name: "live", days: []futures.Daily{dailyBar(18, 999)}}
 	src := NewStoredSource(st, live)
+	src.Cache.SetFreeMemory(func() uint64 { return 32 << 30 })
 	v := mustVariety(t, "CU")
 
 	if _, err := src.Daily(context.Background(), v); err != nil {
@@ -128,7 +139,7 @@ func TestSyncMergesNewBarsIntoCache(t *testing.T) {
 	if _, err := st.UpsertFuturesBars([]store.FuturesBar{old}); err != nil {
 		t.Fatal(err)
 	}
-	cache := NewBarCache()
+	cache := newTestCache()
 	cache.Fill(symbol, "5", []store.FuturesBar{old})
 
 	live := &baseSource{name: "live", minute: []futures.Bar{
@@ -157,7 +168,7 @@ func TestWarmSyncsOnceThenStops(t *testing.T) {
 		minute: []futures.Bar{minuteBar(21, 0, 100)},
 		days:   []futures.Daily{dailyBar(18, 99)},
 	}
-	cache := NewBarCache()
+	cache := newTestCache()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -193,7 +204,7 @@ func TestWarmCancelledBeforeSyncSkipsNetwork(t *testing.T) {
 	live := &baseSource{name: "live", minute: []futures.Bar{minuteBar(21, 0, 100)}}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	err := Warm(ctx, st, NewBarCache(), []futures.BarSource{live}, WarmConfig{Periods: []string{"5"}})
+	err := Warm(ctx, st, newTestCache(), []futures.BarSource{live}, WarmConfig{Periods: []string{"5"}})
 	if err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}

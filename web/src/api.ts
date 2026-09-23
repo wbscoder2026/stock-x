@@ -14,6 +14,7 @@ import type {
   FuturesSweepWorkersResult,
   FuturesAcrossScan,
   FuturesBackfillStatus,
+  FuturesLocalDetail,
   FuturesFavorite,
   FuturesFavoriteInput,
   FuturesLocalReport,
@@ -169,11 +170,16 @@ export function fetchFuturesVarieties() {
   return apiGet<FuturesVariety[]>('/api/futures/varieties')
 }
 
+export function fetchFuturesLocalDetail(prefix: string, symbol?: string) {
+  const q = symbol ? `&symbol=${encodeURIComponent(symbol)}` : ''
+  return apiGet<FuturesLocalDetail>(`/api/futures/local/detail?prefix=${encodeURIComponent(prefix)}${q}`)
+}
+
 export function fetchFuturesLocal() {
   return apiGet<FuturesLocalReport>('/api/futures/local')
 }
 
-export function postFuturesLocalBackfill(body: { prefix: string; from?: string; to?: string }) {
+export function postFuturesLocalBackfill(body: { prefix: string; symbol?: string; from?: string; to?: string }) {
   return apiSend<FuturesBackfillStatus>('/api/futures/local/backfill', 'POST', body)
 }
 

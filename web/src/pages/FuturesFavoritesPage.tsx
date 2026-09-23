@@ -56,7 +56,7 @@ export default function FuturesFavoritesPage() {
   const [scanning, setScanning] = useState(false)
   const [workers, setWorkers] = useState(4)
   const [scan, setScan] = useState<FuturesAcrossScan>()
-  const [onlyTraded, setOnlyTraded] = useState(true)
+  const [onlyTraded, setOnlyTraded] = useState(false) // 默认显示全部品种：被过滤掉会让人以为「品种不在」
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -320,7 +320,12 @@ function ScanReport({
     { title: '平均收益', dataIndex: 'avg_return', width: 100, render: (v: number) => signed(v) },
     { title: '期望R', dataIndex: 'avg_r', width: 80, render: (v: number) => v.toFixed(2) },
     { title: '盈利因子', dataIndex: 'profit_factor', width: 90, render: (v: number) => (v ? v.toFixed(2) : '-') },
-    { title: '说明', dataIndex: 'error', ellipsis: true },
+    {
+      title: '说明',
+      dataIndex: 'error',
+      ellipsis: true,
+      render: (v: string, r) => v || (r.trades === 0 ? '该品种在这段区间没触发信号（不是出错）' : ''),
+    },
   ]
 
   return (
@@ -341,11 +346,31 @@ function ScanReport({
         <Statistic title="总成交" value={overall.total_trades} />
       </Space>
       {scan.skipped?.length ? (
-        <Alert style={{ marginBottom: 12 }} type="warning" showIcon message={`跳过 ${scan.skipped.length} 个品种`} description={scan.skipped.join('；')} />
+        <Alert
+          style={{ marginBottom: 12 }}
+          type="warning"
+          showIcon
+          message={`跳过 ${scan.skipped.length} 个品种（取数失败）`}
+          description={
+            <>
+              <div style={{ marginBottom: 6 }}>
+                这些品种本地库里没有对应级别的数据、联网兜底也失败了。到「期货本地」页触发一次同步再扫，通常就能补上。
+              </div>
+              <ul style={{ margin: 0, paddingLeft: 18 }}>
+                {scan.skipped.map((s) => (
+                  <li key={s}>{s}</li>
+                ))}
+              </ul>
+            </>
+          }
+        />
       ) : null}
-      <Space style={{ marginBottom: 8 }}>
+      <Space style={{ marginBottom: 8 }} wrap>
         <span>品种明细只看有成交或失败</span>
         <Switch size="small" checked={onlyTraded} onChange={onOnlyTraded} />
+        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          共 {scan.symbols} 个品种全都会列出（无成交的也在）；打开开关只是折叠显示，不代表品种缺失
+        </Typography.Text>
       </Space>
       <Table
         size="small"
@@ -361,7 +386,8 @@ function ScanReport({
               rowKey="symbol"
               columns={detailCols}
               dataSource={(row.details ?? []).filter((d) => !onlyTraded || d.trades > 0 || !!d.error)}
-              pagination={{ pageSize: 15, showSizeChanger: false }}
+              pagination={false}
+              scroll={{ y: 420 }}
             />
           ),
         }}

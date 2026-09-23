@@ -24,30 +24,30 @@ func TestParamsDefaultStopATR(t *testing.T) {
 func TestRecommendPricesWithStopMultiple(t *testing.T) {
 	// 螺纹钢（报价单位 1）：现价 100、ATR 4
 	// 止损 = 现价 − stopATR×ATR；止盈距离 = stopATR×ATR×盈亏比
-	stop, tp := RecommendPrices("RB", DirUp, 100, 4, 0.5, 1.5)
+	stop, tp := RecommendStop(StopInput{Prefix: "RB", Direction: DirUp, Entry: 100, ATR: 4, StopATR: 0.5, RR: 1.5, StopMode: StopModeATR})
 	if stop != 98 || tp != 103 {
 		t.Fatalf("0.5×ATR 止损不对：stop=%v tp=%v", stop, tp)
 	}
-	stop, tp = RecommendPrices("RB", DirUp, 100, 4, 1, 1.5)
+	stop, tp = RecommendStop(StopInput{Prefix: "RB", Direction: DirUp, Entry: 100, ATR: 4, StopATR: 1, RR: 1.5, StopMode: StopModeATR})
 	if stop != 96 || tp != 106 {
 		t.Fatalf("1×ATR 止损不对：stop=%v tp=%v", stop, tp)
 	}
-	stop, tp = RecommendPrices("RB", DirUp, 100, 4, 2, 1.5)
+	stop, tp = RecommendStop(StopInput{Prefix: "RB", Direction: DirUp, Entry: 100, ATR: 4, StopATR: 2, RR: 1.5, StopMode: StopModeATR})
 	if stop != 92 || tp != 112 {
 		t.Fatalf("2×ATR 止损不对：stop=%v tp=%v", stop, tp)
 	}
 	// 做空镜像
-	stop, tp = RecommendPrices("RB", DirDown, 100, 4, 0.5, 2)
+	stop, tp = RecommendStop(StopInput{Prefix: "RB", Direction: DirDown, Entry: 100, ATR: 4, StopATR: 0.5, RR: 2, StopMode: StopModeATR})
 	if stop != 102 || tp != 96 {
 		t.Fatalf("做空 0.5×ATR 不对：stop=%v tp=%v", stop, tp)
 	}
 	// 倍数非法 → 按默认 1×ATR
-	stop, tp = RecommendPrices("RB", DirUp, 100, 4, 0, 1.5)
+	stop, tp = RecommendStop(StopInput{Prefix: "RB", Direction: DirUp, Entry: 100, ATR: 4, StopATR: 0, RR: 1.5, StopMode: StopModeATR})
 	if stop != 96 || tp != 106 {
 		t.Fatalf("非法倍数应回落 1×ATR：stop=%v tp=%v", stop, tp)
 	}
 	// 仍然要对齐报价单位（焦煤 0.5）：1234−6.15=1227.85→1228；1234+9.225=1243.225→1243
-	stop, tp = RecommendPrices("JM", DirUp, 1234, 12.3, 0.5, 1.5)
+	stop, tp = RecommendStop(StopInput{Prefix: "JM", Direction: DirUp, Entry: 1234, ATR: 12.3, StopATR: 0.5, RR: 1.5, StopMode: StopModeATR})
 	if stop != 1228 || tp != 1243 {
 		t.Fatalf("焦煤 0.5×ATR 没对齐：stop=%v tp=%v", stop, tp)
 	}
@@ -116,7 +116,7 @@ func TestCollectNewCarriesStopATR(t *testing.T) {
 	ts0 := time.Date(2026, 9, 22, 9, 50, 0, 0, locCST)
 	got := collectNew(map[string]int64{}, []Event{
 		{Time: ts0, Direction: DirUp, Level: "PDH(昨高)", Close: 3000, ATR: 20},
-	}, time.Time{}, "2026-09-22", v, 0.5, 1.5)
+	}, time.Time{}, "2026-09-22", v, Params{StopATR: 0.5, RR: 1.5})
 	if len(got) != 1 {
 		t.Fatalf("应有 1 条：%+v", got)
 	}
