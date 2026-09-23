@@ -1,12 +1,23 @@
 // 期货回测页：单品种扫描（关键位 + 价格图）+ 回测（1×ATR 止损 + 盈亏比止盈）+ 参数扫描（网格搜索）。
 // 与「监控突破」页拆开：这里不订阅任何行情，只在你点按钮时取一次数据。
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type Key } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import dayjs from 'dayjs'
 import type { Dayjs } from 'dayjs'
-import { Alert, App, Button, Card, DatePicker, Form, InputNumber, Select, Space, Statistic, Switch, Table, Tag, Tooltip, Typography } from 'antd'
+import { Alert, App, Button, Card, DatePicker, Form, Input, InputNumber, Modal, Progress, Select, Space, Statistic, Switch, Table, Tag, Tooltip, Typography } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
-import { fetchFuturesContracts, fetchFuturesScan, fetchFuturesVarieties, postFuturesBacktest, postFuturesSweep } from '../api'
+import { fetchFuturesContracts, fetchFuturesScan, fetchFuturesVarieties, postFuturesBacktest, postFuturesFavorites } from '../api'
+import {
+  setSweepForm,
+  setSweepView,
+  setSweepWorkers,
+  startSweep,
+  sweepElapsedSec,
+  sweepPercent,
+  sweepRemainSec,
+  useSweepState,
+} from '../sweepStore'
+import type { SweepSortKey } from '../sweepStore'
 import type {
   FuturesBacktestResult,
   FuturesContract,
@@ -16,7 +27,6 @@ import type {
   FuturesSnapshot,
   FuturesSweepObjective,
   FuturesSweepRequest,
-  FuturesSweepResult,
   FuturesSweepRow,
   FuturesVariety,
 } from '../types'
@@ -121,12 +131,16 @@ function numAxis(vals: string[], fallback: number): number[] {
   return parsed.length ? parsed : [fallback]
 }
 
+// 秒 → 人话（s / 分钟 / 小时）
+function fmtDur(sec: number): string {
+  if (sec < 60) return `${Math.max(1, Math.round(sec))}s`
+  if (sec < 3600) return `${(sec / 60).toFixed(1)} 分钟`
+  return `${(sec / 3600).toFixed(1)} 小时`
+}
+
 // 排序：不依赖 Table 内置排序（antd v6 行为与 v5 有差异，点了不动），
 // 自己维护 sortKey/sortAsc + 点击表头切换，行为完全可预期。
-type SweepSortKey =
-  | 'win_rate' | 'avg_return' | 'avg_r' | 'profit_factor' | 'trades'
-  | 'rr' | 'stop_atr' | 'hold_bars' | 'donchian' | 'orb'
-
+// （SweepSortKey / 扫描状态都在 sweepStore，切页面再回来排序也还在。）
 const SWEEP_SORT_LABEL: Record<SweepSortKey, string> = {
   win_rate: '胜率',
   avg_return: '平均收益',
@@ -186,11 +200,21 @@ function SortHeader({
   )
 }
 
+function sweepRowKey(r: FuturesSweepRow) {
+  return (
+    `${r.params.period}-${r.params.rr}-${r.params.stop_atr}-${r.params.hold_bars}-${r.params.donchian}-` +
+    `${r.params.orb}-${r.params.atr_period}-${r.params.atr_k}-${r.params.vol_ratio}-${r.params.no_overnight ? 1 : 0}`
+  )
+}
+
+function clipName(name: string) {
+  return [...name].slice(0, 80).join('')
+}
+
 const sweepCols = (
   onApply: (row: FuturesSweepRow) => void,
   sort: { key?: SweepSortKey; asc: boolean; onSort: (key: SweepSortKey) => void },
 ): ColumnsType<FuturesSweepRow> => [
-  { title: '#', key: 'idx', width: 46, render: (_, __, i) => i + 1 },
   { title: '#', key: 'idx', width: 46, render: (_, __, i) => i + 1 },
   {
     title: <ParamLabel text="级别" hint={TIPS.sweep_period} />,
@@ -282,26 +306,40 @@ export default function FuturesBacktestPage() {
   const [result, setResult] = useState<FuturesBacktestResult>()
   const snapCardRef = useRef<HTMLDivElement>(null)
 
-  // 参数扫描
-  const [swPeriods, setSwPeriods] = useState<string[]>([])
-  const [swOrb, setSwOrb] = useState<string[]>([])
-  const [swDon, setSwDon] = useState<string[]>(['10', '20', '30'])
-  const [swAtrP, setSwAtrP] = useState<string[]>([])
-  const [swAtrK, setSwAtrK] = useState<string[]>([])
-  const [swVol, setSwVol] = useState<string[]>([])
-  const [swHold, setSwHold] = useState<string[]>(['4', '6', '8'])
-  const [swStop, setSwStop] = useState<string[]>(['0.5', '1', '1.5'])
-  const [swOvernight, setSwOvernight] = useState<string[]>([])
-  const [swRr, setSwRr] = useState<string[]>(['1', '1.5', '2', '3'])
-  const [objective, setObjective] = useState<FuturesSweepObjective>('avg_return')
-  const [minTrades, setMinTrades] = useState(30)
-  const [workers, setWorkers] = useState(0) // 0 = 自动
-  const [msPerCombo, setMsPerCombo] = useState<number>() // 上次实测的单组耗时，用来估时
-  const [sweeping, setSweeping] = useState(false)
-  const [sweep, setSweep] = useState<FuturesSweepResult>()
-  const [sortKey, setSortKey] = useState<SweepSortKey>('avg_return')
-  const [sortAsc, setSortAsc] = useState(false)
-  const [onlyReliable, setOnlyReliable] = useState(true)
+  // 参数扫描：表单 / 进度 / 结果都在 sweepStore（模块级），切页面回来还在
+  const sweepState = useSweepState()
+  const {
+    periods: swPeriods,
+    orb: swOrb,
+    donchian: swDon,
+    atrPeriod: swAtrP,
+    atrK: swAtrK,
+    volRatio: swVol,
+    holdBars: swHold,
+    stopATR: swStop,
+    overnight: swOvernight,
+    rr: swRr,
+    objective,
+    minTrades,
+    workers,
+  } = sweepState.form
+  const setSwPeriods = (v: string[]) => setSweepForm({ periods: v })
+  const setSwOrb = (v: string[]) => setSweepForm({ orb: v })
+  const setSwDon = (v: string[]) => setSweepForm({ donchian: v })
+  const setSwAtrP = (v: string[]) => setSweepForm({ atrPeriod: v })
+  const setSwAtrK = (v: string[]) => setSweepForm({ atrK: v })
+  const setSwVol = (v: string[]) => setSweepForm({ volRatio: v })
+  const setSwHold = (v: string[]) => setSweepForm({ holdBars: v })
+  const setSwStop = (v: string[]) => setSweepForm({ stopATR: v })
+  const setSwOvernight = (v: string[]) => setSweepForm({ overnight: v })
+  const setSwRr = (v: string[]) => setSweepForm({ rr: v })
+  const setObjective = (v: FuturesSweepObjective) => setSweepForm({ objective: v })
+  const setMinTrades = (v: number) => setSweepForm({ minTrades: v })
+  const setWorkers = setSweepWorkers // 扫描中改会当场通知服务端 Tune 协程池
+  const sweeping = sweepState.running
+  const sweep = sweepState.result
+  const msPerCombo = sweepState.msPerCombo
+  const { sortKey, sortAsc, onlyReliable } = sweepState
   const [range, setRange] = useState<RangeValue>(null)
 
   useEffect(() => {
@@ -439,14 +477,70 @@ export default function FuturesBacktestPage() {
       return (b.trades ?? 0) - (a.trades ?? 0) // 同值按样本多的在前
     })
   }, [sweep, sortKey, sortAsc, onlyReliable])
+  const [pickedKeys, setPickedKeys] = useState<Key[]>([])
+  const [favOpen, setFavOpen] = useState(false)
+  const [favName, setFavName] = useState('')
+  const [favNote, setFavNote] = useState('')
+  const [savingFav, setSavingFav] = useState(false)
+  const pickedRows = useMemo(() => {
+    const keys = new Set(pickedKeys)
+    return (sweep?.rows ?? []).filter((r) => keys.has(sweepRowKey(r)))
+  }, [pickedKeys, sweep])
+
+  useEffect(() => {
+    setPickedKeys([])
+  }, [sweep])
 
   function toggleSort(key: SweepSortKey) {
     if (key === sortKey) {
-      setSortAsc((v) => !v)
+      setSweepView({ sortAsc: !sortAsc })
       return
     }
-    setSortKey(key)
-    setSortAsc(false) // 换列默认降序（找最优）
+    setSweepView({ sortKey: key, sortAsc: false }) // 换列默认降序（找最优）
+  }
+
+  function openSaveFavorites() {
+    if (pickedRows.length === 0) {
+      message.warning('先勾选要收藏的扫描结果')
+      return
+    }
+    setFavName(`${symbol} 收藏`)
+    setFavNote('')
+    setFavOpen(true)
+  }
+
+  async function saveFavorites() {
+    const prefix = favName.trim()
+    if (!prefix) {
+      message.warning('填一个名称')
+      return
+    }
+    setSavingFav(true)
+    try {
+      const items = pickedRows.map((row, i) => ({
+        name: clipName(
+          pickedRows.length === 1
+            ? prefix
+            : `${prefix} #${i + 1} · ${row.params.period}分钟 RR${row.params.rr} 止损${row.params.stop_atr}`,
+        ),
+        note: favNote.trim(),
+        params: { ...row.params, symbol: sweep?.symbol || symbol },
+        origin_symbol: sweep?.symbol || symbol,
+        origin_win_rate: row.win_rate,
+        origin_avg_return: row.avg_return,
+        origin_avg_r: row.avg_r,
+        origin_profit_factor: row.profit_factor,
+        origin_trades: row.trades,
+      }))
+      await postFuturesFavorites(items)
+      message.success(`已保存 ${items.length} 条，可到「期货收藏」里管理或扫全品种`)
+      setFavOpen(false)
+      setPickedKeys([])
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : '保存失败')
+    } finally {
+      setSavingFav(false)
+    }
   }
 
   const comboCount =
@@ -462,16 +556,13 @@ export default function FuturesBacktestPage() {
     (sweepBody.rr?.length ?? 1)
 
   async function runSweep() {
-    setSweeping(true)
     try {
-      const res = await postFuturesSweep(sweepBody)
-      setSweep(res)
-      if (res.combos > 0 && res.elapsed_ms > 0) setMsPerCombo(res.elapsed_ms / res.combos)
+      // 请求挂在 sweepStore 上：切页面也照跑，回来继续显示进度/结果
+      const res = await startSweep(sweepBody)
+      if (!res) return // 已经有一次在跑
       message.success(`扫完 ${res.combos} 个组合（并发 ${res.workers}），用时 ${(res.elapsed_ms / 1000).toFixed(1)}s`)
     } catch (e) {
       message.error(e instanceof Error ? e.message : '参数扫描失败')
-    } finally {
-      setSweeping(false)
     }
   }
 
@@ -491,6 +582,10 @@ export default function FuturesBacktestPage() {
 
   const objectiveLabel = OBJECTIVES.find((o) => o.value === objective)?.label ?? objective
   const etaSec = msPerCombo ? Math.round((comboCount * msPerCombo) / 1000) : undefined
+  // 扫描中的实时进度（进度条 + 已用/剩余时间）
+  const sweepPct = sweepPercent(sweepState)
+  const sweepElapsed = sweepElapsedSec(sweepState)
+  const sweepLeft = sweepRemainSec(sweepState)
 
   return (
     <div className="page-wrap">
@@ -605,7 +700,7 @@ export default function FuturesBacktestPage() {
             <Tooltip title="隐藏样本数少于「最少样本」的组合（避免被 3 笔 100% 胜率这种组合带偏）">
               <span className="param-label">
                 只看样本足
-                <Switch size="small" checked={onlyReliable} onChange={setOnlyReliable} />
+                <Switch size="small" checked={onlyReliable} onChange={(v) => setSweepView({ onlyReliable: v })} />
               </span>
             </Tooltip>
             <ParamLabel text="并发" hint={TIPS.workers} />
@@ -689,6 +784,21 @@ export default function FuturesBacktestPage() {
           样本不足的组合会被标出来并排在后面。
         </Typography.Paragraph>
 
+        {sweeping ? (
+          <div style={{ marginTop: 12 }}>
+            <Progress percent={sweepPct} status="active" size="small" />
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              {sweepState.total > 0
+                ? `已跑 ${sweepState.done.toLocaleString()} / ${sweepState.total.toLocaleString()} 组`
+                : '正在取各级别 K 线…'}
+              （并发 {sweepState.liveWorkers ?? (workers > 0 ? workers : '自动')}，改上面的「并发」立刻生效）· 已用{' '}
+              {fmtDur(sweepElapsed)}
+              {sweepLeft != null ? ` · 预计还需 ${fmtDur(sweepLeft)}` : ''} —— 可以切到别的页面，
+              回来进度和结果都还在（但别刷新页面，刷新会取消请求）
+            </Typography.Text>
+          </div>
+        ) : null}
+
         {sweep ? (
           <>
             <Alert
@@ -718,25 +828,32 @@ export default function FuturesBacktestPage() {
             />
             <Table
               size="small"
-              rowKey={(r) =>
-                `${r.params.period}-${r.params.rr}-${r.params.stop_atr}-${r.params.hold_bars}-${r.params.donchian}-` +
-                `${r.params.orb}-${r.params.atr_period}-${r.params.atr_k}-${r.params.vol_ratio}-${r.params.no_overnight ? 1 : 0}`
-              }
+              rowKey={sweepRowKey}
+              rowSelection={{
+                selectedRowKeys: pickedKeys,
+                preserveSelectedRowKeys: true,
+                onChange: (keys) => setPickedKeys(keys),
+              }}
               columns={sweepCols(applySweepRow, { key: sortKey, asc: sortAsc, onSort: toggleSort })}
               dataSource={sweepRows}
               pagination={{ pageSize: 20, showSizeChanger: false }}
               scroll={{ x: 1400 }}
               locale={{ emptyText: '没有组合跑出样本' }}
               title={() => (
-                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                  共 {sweep.combos} 个组合（{(sweep.periods ?? []).map((p) => `${p}分钟`).join(' / ')}）· 当前 {sweepRows.length}{' '}
-                  行{onlyReliable && sweepRows.length !== sweep.rows.length ? `（已隐藏样本不足的 ${sweep.rows.length - sweepRows.length} 组）` : ''} · 排序：
-                  {SWEEP_SORT_LABEL[sortKey]}{sortAsc ? ' 升序' : ' 降序'} · 并发{' '}
-                  {sweep.workers ?? 0} · 回测耗时 {(sweep.elapsed_ms / 1000).toFixed(1)}s · 各级别 K 线根数{' '}
-                  {(sweep.periods ?? []).map((p) => `${p}分钟 ${sweep.period_bars?.[p] ?? 0} 根`).join('，')}
-                  {' '}—— <b>覆盖区间不同，样本数不可直接横向比</b>
-                  {sweep.skipped?.length ? ` · 跳过：${sweep.skipped.join('；')}` : ''}
-                </Typography.Text>
+                <Space size={12} wrap>
+                  <Button size="small" type="primary" disabled={pickedRows.length === 0} onClick={openSaveFavorites}>
+                    保存为收藏{pickedRows.length ? `（${pickedRows.length}）` : ''}
+                  </Button>
+                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    共 {sweep.combos} 个组合（{(sweep.periods ?? []).map((p) => `${p}分钟`).join(' / ')}）· 当前 {sweepRows.length}{' '}
+                    行{onlyReliable && sweepRows.length !== sweep.rows.length ? `（已隐藏样本不足的 ${sweep.rows.length - sweepRows.length} 组）` : ''} · 排序：
+                    {SWEEP_SORT_LABEL[sortKey]}{sortAsc ? ' 升序' : ' 降序'} · 并发{' '}
+                    {sweep.workers ?? 0} · 回测耗时 {(sweep.elapsed_ms / 1000).toFixed(1)}s · 各级别 K 线根数{' '}
+                    {(sweep.periods ?? []).map((p) => `${p}分钟 ${sweep.period_bars?.[p] ?? 0} 根`).join('，')}
+                    {' '}—— <b>覆盖区间不同，样本数不可直接横向比</b>
+                    {sweep.skipped?.length ? ` · 跳过：${sweep.skipped.join('；')}` : ''}
+                  </Typography.Text>
+                </Space>
               )}
             />
           </>
@@ -822,6 +939,23 @@ export default function FuturesBacktestPage() {
           />
         </>
       ) : null}
+      <Modal
+        title={`保存 ${pickedRows.length} 条收藏`}
+        open={favOpen}
+        confirmLoading={savingFav}
+        onOk={() => void saveFavorites()}
+        onCancel={() => setFavOpen(false)}
+        okText="保存"
+      >
+        <Form layout="vertical">
+          <Form.Item label="名称" extra={pickedRows.length > 1 ? '多条时会在名称后自动加上级别、盈亏比和止损，方便区分' : undefined}>
+            <Input value={favName} maxLength={40} onChange={(e) => setFavName(e.target.value)} />
+          </Form.Item>
+          <Form.Item label="备注">
+            <Input.TextArea value={favNote} rows={3} maxLength={500} onChange={(e) => setFavNote(e.target.value)} />
+          </Form.Item>
+        </Form>
+      </Modal>
     </div>
   )
 }

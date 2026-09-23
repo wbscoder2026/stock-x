@@ -18,18 +18,19 @@ const (
 	DefaultDailyBars  = 2000
 )
 
-// StoredSource 本地优先数据源：先读 SQLite，本地没数据才走网络（可选回写，越用越厚）。
+// StoredSource 本地优先数据源：先读内存，再读 SQLite，都没有才走网络（可选回写，越用越厚）。
 // 监控不能用它（要最新行情），它给回测/研究用。
 type StoredSource struct {
 	Store      *store.Store
 	Live       futures.BarSource
+	Cache      *BarCache
 	Warm       bool
 	MinuteBars int
 	DailyBars  int
 }
 
 func NewStoredSource(st *store.Store, live futures.BarSource) *StoredSource {
-	return &StoredSource{Store: st, Live: live, Warm: true}
+	return &StoredSource{Store: st, Live: live, Cache: NewBarCache(), Warm: true}
 }
 
 func (s *StoredSource) Name() string {
@@ -41,12 +42,17 @@ func (s *StoredSource) Name() string {
 
 func (s *StoredSource) Minute(ctx context.Context, v futures.Variety, period string) ([]futures.Bar, error) {
 	symbol := futures.MainSymbol(v)
+	limit := s.minuteBars()
+	if rows, ok := s.cached(symbol, period, limit); ok {
+		return barsFromRows(rows), nil
+	}
 	if s.Store != nil {
-		rows, err := s.Store.FuturesBars(symbol, period, s.minuteBars())
+		rows, err := s.Store.FuturesBars(symbol, period, limit)
 		if err != nil {
 			return nil, err
 		}
 		if len(rows) > 0 {
+			s.remember(symbol, period, rows)
 			return barsFromRows(rows), nil
 		}
 	}
@@ -57,20 +63,27 @@ func (s *StoredSource) Minute(ctx context.Context, v futures.Variety, period str
 	if err != nil {
 		return nil, err
 	}
+	rows := rowsFromBars(symbol, period, bars)
 	if s.Warm && s.Store != nil {
-		_, _ = s.Store.UpsertFuturesBars(rowsFromBars(symbol, period, bars))
+		_, _ = s.Store.UpsertFuturesBars(rows)
 	}
+	s.remember(symbol, period, rows)
 	return bars, nil
 }
 
 func (s *StoredSource) Daily(ctx context.Context, v futures.Variety) ([]futures.Daily, error) {
 	symbol := futures.MainSymbol(v)
+	limit := s.dailyBars()
+	if rows, ok := s.cached(symbol, DailyPeriod, limit); ok {
+		return daysFromRows(rows), nil
+	}
 	if s.Store != nil {
-		rows, err := s.Store.FuturesBars(symbol, DailyPeriod, s.dailyBars())
+		rows, err := s.Store.FuturesBars(symbol, DailyPeriod, limit)
 		if err != nil {
 			return nil, err
 		}
 		if len(rows) > 0 {
+			s.remember(symbol, DailyPeriod, rows)
 			return daysFromRows(rows), nil
 		}
 	}
@@ -81,10 +94,30 @@ func (s *StoredSource) Daily(ctx context.Context, v futures.Variety) ([]futures.
 	if err != nil {
 		return nil, err
 	}
+	rows := rowsFromDays(symbol, days)
 	if s.Warm && s.Store != nil {
-		_, _ = s.Store.UpsertFuturesBars(rowsFromDays(symbol, days))
+		_, _ = s.Store.UpsertFuturesBars(rows)
 	}
+	s.remember(symbol, DailyPeriod, rows)
 	return days, nil
+}
+
+func (s *StoredSource) cached(symbol, period string, limit int) ([]store.FuturesBar, bool) {
+	if s == nil || s.Cache == nil {
+		return nil, false
+	}
+	rows, ok := s.Cache.Get(symbol, period)
+	if !ok {
+		return nil, false
+	}
+	return tailBars(rows, limit), true
+}
+
+func (s *StoredSource) remember(symbol, period string, rows []store.FuturesBar) {
+	if s == nil {
+		return
+	}
+	s.Cache.Fill(symbol, period, rows)
 }
 
 func (s *StoredSource) minuteBars() int {

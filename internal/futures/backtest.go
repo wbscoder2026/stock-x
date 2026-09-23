@@ -45,6 +45,12 @@ func BacktestWithSource(ctx context.Context, src BarSource, p Params) (Result, e
 }
 
 func BacktestBars(minutes []Bar, daily []Daily, p Params) Result {
+	return runBacktest(minutes, daily, p, true)
+}
+
+// runBacktest 跑回测。withBars 为 false 时不算图表 K 线：参数扫描每个组合都要跑一遍，
+// 复制整段行情只会制造大量临时内存，并行时更容易把进程顶到换页。
+func runBacktest(minutes []Bar, daily []Daily, p Params, withBars bool) Result {
 	p = mergeParams(p)
 	out := Result{Symbol: p.Symbol, Period: p.Period, Items: []Outcome{}}
 	if len(minutes) == 0 {
@@ -78,7 +84,9 @@ func BacktestBars(minutes []Bar, daily []Daily, p Params) Result {
 		out.SkippedEOD += skipped
 	}
 	fillStats(&out, items)
-	out.Bars = klineBars(minutes)
+	if withBars {
+		out.Bars = klineBars(minutes)
+	}
 	return out
 }
 

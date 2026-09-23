@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -169,6 +170,69 @@ func futuresSyncOptions(args []string, deep bool) (futuresync.Options, error) {
 
 func cstZone() *time.Location { return time.FixedZone("CST", 8*3600) }
 
+// warmFutures 把已有期货 K 线装进内存，并在后台按间隔只补新出现的根。
+// 扫描/回测读的是这块内存；历史段不会每次再去接口要。
+func warmFutures(ctx context.Context, bars *futuresync.StoredSource, cfg config.Config) {
+	if bars == nil || bars.Store == nil || bars.Cache == nil {
+		return
+	}
+	periods, err := futuresync.ParsePeriods(cfg.FuturesSyncPeriods)
+	if err != nil {
+		log.Printf("期货同步周期无效（%v），改用 1d,5,15,30,60,120", err)
+		periods, _ = futuresync.ParsePeriods("1d,5,15,30,60,120")
+	}
+	var sources []futures.BarSource
+	if bars.Live != nil {
+		sources = []futures.BarSource{bars.Live}
+	}
+	workers := cfg.FuturesSyncWorkers
+	if workers <= 0 {
+		workers = 4
+	}
+	log.Printf("期货历史：本地库装入内存，并按 %s 增量同步（间隔 %s，并发 %d）",
+		strings.Join(periods, ","), cfg.FuturesSyncEvery, workers)
+	err = futuresync.Warm(ctx, bars.Store, bars.Cache, sources, futuresync.WarmConfig{
+		Periods:  periods,
+		Workers:  workers,
+		Interval: cfg.FuturesSyncEvery,
+		Progress: func(done, total int, msg string) {
+			if done == total || (done > 0 && done%50 == 0) {
+				log.Printf("期货同步 [%d/%d] %s", done, total, msg)
+			}
+		},
+		OnRound: func(stats futuresync.Stats) {
+			log.Printf("期货同步一轮完成：网络 %d 根，本地新增 %d 根，失败 %d",
+				stats.Fetched, stats.Saved, len(stats.Failed))
+			for i, f := range stats.Failed {
+				if i >= 3 {
+					log.Printf("  ...还有 %d 个失败", len(stats.Failed)-3)
+					break
+				}
+				log.Printf("  失败：%s", f)
+			}
+		},
+	})
+	if err != nil && !errors.Is(err, context.Canceled) {
+		log.Printf("期货历史同步停止：%v", err)
+	}
+}
+
+func maintainFuturesCache(ctx context.Context, bars *futuresync.StoredSource, st *store.Store) {
+	if bars == nil || bars.Cache == nil {
+		return
+	}
+	ticker := time.NewTicker(20 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			bars.Cache.Maintain(st)
+		}
+	}
+}
+
 func logProgress(pct int, line string) {
 	if line != "" {
 		log.Printf("[%d%%] %s", pct, line)
@@ -197,6 +261,20 @@ func runServe(cfg config.Config, st *store.Store, mgr *job.Manager) {
 	defer sched.Stop()
 
 	srvAPI := api.New(st, mgr, sched, cfg, cronFn)
+	warmCtx, warmCancel := context.WithCancel(context.Background())
+	defer warmCancel()
+	if cfg.FuturesSync {
+		go warmFutures(warmCtx, srvAPI.Bars, cfg)
+	}
+	if srvAPI.Backfill != nil {
+		log.Printf("期货 1 分钟历史：后台补全已启动（约每 600ms 一个请求，可在「本地期货」页暂停）")
+		go func() {
+			if err := srvAPI.Backfill.Run(warmCtx); err != nil && !errors.Is(err, context.Canceled) {
+				log.Printf("期货 1 分钟补全停止：%v", err)
+			}
+		}()
+		go maintainFuturesCache(warmCtx, srvAPI.Bars, st)
+	}
 	httpSrv := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           srvAPI.Handler(),
@@ -211,6 +289,7 @@ func runServe(cfg config.Config, st *store.Store, mgr *job.Manager) {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	<-sig
+	warmCancel()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = httpSrv.Shutdown(ctx)

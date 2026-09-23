@@ -28,9 +28,14 @@ type VarietyFilter interface {
 }
 
 // RangeSource 支持「指定结束时间往前翻页」的源，用于把历史日线挖深
-// （东财 end 参数：一页 800 根 ≈ 3.3 年；分钟线上游只保留最近约 1000 根，翻不了）。
+// （东财 end 参数：一页 800 根 ≈ 3.3 年）。
 type RangeSource interface {
 	DailyRange(ctx context.Context, v Variety, end time.Time, limit int) ([]Daily, error)
+}
+
+// MinuteRangeSource 支持按结束时间往前翻分钟线。上游往往只留有限窗口，翻不动时返回空数据。
+type MinuteRangeSource interface {
+	MinuteRange(ctx context.Context, v Variety, period string, end time.Time, limit int) ([]Bar, error)
 }
 
 // ---------------------------------------------------------------- 多源容错
@@ -202,6 +207,28 @@ func fetch[T any](m *MultiSource, v Variety, call func(BarSource) ([]T, error)) 
 	return nil, lastErr
 }
 
+// MinuteRange 分钟线翻页。end 为零值表示最新一页；不支持翻页的源在指定 end 时会被跳过。
+func (m *MultiSource) MinuteRange(ctx context.Context, v Variety, period string, end time.Time, limit int) ([]Bar, error) {
+	return fetch(m, v, func(src BarSource) ([]Bar, error) {
+		var bars []Bar
+		var err error
+		if rs, ok := src.(MinuteRangeSource); ok {
+			bars, err = rs.MinuteRange(ctx, v, period, end, limit)
+		} else if !end.IsZero() {
+			return nil, errSourceNotApplicable
+		} else {
+			bars, err = src.Minute(ctx, v, period)
+		}
+		if err != nil {
+			return nil, err
+		}
+		if err := checkBarScale(v.Prefix, barCloses(bars)); err != nil {
+			return nil, err
+		}
+		return bars, nil
+	})
+}
+
 func (m *MultiSource) Minute(ctx context.Context, v Variety, period string) ([]Bar, error) {
 	return fetch(m, v, func(src BarSource) ([]Bar, error) {
 		bars, err := src.Minute(ctx, v, period)
@@ -345,7 +372,7 @@ func eastmoneySecid(v Variety) (string, bool) {
 
 func eastmoneyKlt(period string) (int, error) {
 	switch strings.TrimSpace(period) {
-	case "5", "15", "30", "60", "120":
+	case "1", "5", "15", "30", "60", "120":
 		return strconv.Atoi(period)
 	case "1d", "day":
 		return 101, nil
@@ -361,6 +388,11 @@ func (e *EastmoneySource) httpClient() *http.Client {
 }
 
 func (e *EastmoneySource) Minute(ctx context.Context, v Variety, period string) ([]Bar, error) {
+	return e.MinuteRange(ctx, v, period, time.Time{}, 0)
+}
+
+// MinuteRange 取「截至 end 那天（含）」的分钟线；end 为零值表示最新。用于往前补 1 分钟历史。
+func (e *EastmoneySource) MinuteRange(ctx context.Context, v Variety, period string, end time.Time, limit int) ([]Bar, error) {
 	secid, ok := eastmoneySecid(v)
 	if !ok {
 		return nil, fmt.Errorf("东财不支持 %s", v.Prefix)
@@ -369,11 +401,17 @@ func (e *EastmoneySource) Minute(ctx context.Context, v Variety, period string) 
 	if err != nil {
 		return nil, err
 	}
-	limit := e.MinuteLimit
+	if limit <= 0 {
+		limit = e.MinuteLimit
+	}
 	if limit <= 0 {
 		limit = 1000
 	}
-	lines, err := e.fetch(ctx, secid, klt, limit, "20500101")
+	endDate := "20500101"
+	if !end.IsZero() {
+		endDate = end.In(locCST).Format("20060102")
+	}
+	lines, err := e.fetch(ctx, secid, klt, limit, endDate)
 	if err != nil {
 		return nil, err
 	}

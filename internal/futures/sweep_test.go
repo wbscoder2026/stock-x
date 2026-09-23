@@ -3,6 +3,7 @@ package futures
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -35,16 +36,56 @@ func TestSweepCombosExpansion(t *testing.T) {
 }
 
 func TestSweepRejectsTooManyCombos(t *testing.T) {
-	// 上限 10000：30×30×30 = 27000 组要拦住
+	// 上限 1000 万：30^5 = 2430 万组要拦住
 	thirty := make([]int, 0, 30)
 	for i := 1; i <= 30; i++ {
 		thirty = append(thirty, i)
 	}
-	req := SweepRequest{HoldBars: thirty, Donchian: thirty, ATRPeriod: thirty, Objective: SweepObjectiveAvgReturn}
+	thirtyF := make([]float64, 0, 30)
+	for i := 1; i <= 30; i++ {
+		thirtyF = append(thirtyF, float64(i))
+	}
+	req := SweepRequest{HoldBars: thirty, Donchian: thirty, ATRPeriod: thirty, ORB: thirty, ATRK: thirtyF, Objective: SweepObjectiveAvgReturn}
 	if _, err := normalizeSweep(req); err == nil {
 		t.Fatal("组合数超上限应报错")
 	} else if !strings.Contains(err.Error(), "组合数") {
 		t.Fatalf("错误信息应说明组合数：%v", err)
+	}
+}
+
+func TestSweepReportsProgress(t *testing.T) {
+	minutes, daily := sweepFixture()
+	var mu sync.Mutex
+	seen := map[int]int{} // done → total
+	var order []int
+	req := SweepRequest{
+		Symbol: "RB0", Period: "5",
+		Donchian: []int{50}, VolRatio: []float64{1.5}, HoldBars: []int{6},
+		RR: []float64{1, 2}, StopATR: []float64{1},
+		MinTrades: 1, Workers: 2,
+	}
+	req.OnProgress = func(done, total int) {
+		mu.Lock()
+		defer mu.Unlock()
+		seen[done] = total
+		order = append(order, done)
+	}
+	res := SweepBars(minutes, daily, req)
+	if res.Combos != 2 {
+		t.Fatalf("组合数应为 2：%d", res.Combos)
+	}
+	// 开跑前先报一次 total（done=0），前端才能画进度条
+	if len(order) == 0 || order[0] != 0 {
+		t.Fatalf("第一次回调应该是 done=0：%v", order)
+	}
+	// 之后每个组合回调一次，done 覆盖 0..2（回调可能在多个 worker 上并发，不保证顺序）
+	if len(seen) != 3 {
+		t.Fatalf("应回调 3 次（0/1/2）：%v", seen)
+	}
+	for done := 0; done <= 2; done++ {
+		if total, ok := seen[done]; !ok || total != 2 {
+			t.Fatalf("done=%d 的 total 不对：%v", done, seen)
+		}
 	}
 }
 

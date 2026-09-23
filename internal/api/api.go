@@ -24,13 +24,14 @@ import (
 const Version = "0.1.0"
 
 type Server struct {
-	Store  *store.Store
-	Jobs   *job.Manager
-	Sched  *job.Scheduler
-	Cfg    config.Config
-	Watch  *futures.Watcher
-	Bars   *futuresync.StoredSource // 回测/研究用：本地优先，缺数据走网络并回写
-	cronFn func()
+	Store    *store.Store
+	Jobs     *job.Manager
+	Sched    *job.Scheduler
+	Cfg      config.Config
+	Watch    *futures.Watcher
+	Bars     *futuresync.StoredSource // 回测/研究用：本地优先，缺数据走网络并回写
+	Backfill *futuresync.Backfiller   // 后台慢慢补 1 分钟历史
+	cronFn   func()
 }
 
 func New(st *store.Store, jobs *job.Manager, sched *job.Scheduler, cfg config.Config, cronFn func()) *Server {
@@ -39,6 +40,7 @@ func New(st *store.Store, jobs *job.Manager, sched *job.Scheduler, cfg config.Co
 		Watch: futures.NewDefaultWatcher(),
 		Bars:  futuresync.NewStoredSource(st, futures.NewMultiSource(futures.DefaultSources()...)),
 	}
+	srv.Backfill = futuresync.NewBackfiller(st, srv.Bars.Cache, srv.Bars.Live)
 	srv.Watch.OnEvents = srv.pushFuturesAlerts // 系统级提醒：飞书 / 本机通知
 	_ = srv.applyFuturesBlacklist()            // 重启后黑名单仍然生效
 	srv.restoreFuturesWatch()                  // 重启后按上次的配置自动恢复监控（默认开启）
@@ -302,10 +304,22 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/notify/test", s.notifyTest)
 	mux.HandleFunc("POST /api/backtest", s.postBacktest)
 	mux.HandleFunc("GET /api/futures/varieties", s.futuresVarieties)
+	mux.HandleFunc("GET /api/futures/favorites", s.futuresFavoritesList)
+	mux.HandleFunc("POST /api/futures/favorites", s.futuresFavoritesCreate)
+	mux.HandleFunc("PUT /api/futures/favorites/{id}", s.futuresFavoritesUpdate)
+	mux.HandleFunc("DELETE /api/futures/favorites/{id}", s.futuresFavoritesDelete)
+	mux.HandleFunc("POST /api/futures/favorites/delete", s.futuresFavoritesDelete)
+	mux.HandleFunc("POST /api/futures/favorites/scan", s.futuresFavoritesScan)
+	mux.HandleFunc("GET /api/futures/local", s.futuresLocal)
+	mux.HandleFunc("POST /api/futures/local/backfill", s.futuresLocalBackfill)
+	mux.HandleFunc("POST /api/futures/local/pause", s.futuresLocalPause)
+	mux.HandleFunc("POST /api/futures/local/resume", s.futuresLocalResume)
 	mux.HandleFunc("GET /api/futures/contracts", s.futuresContracts)
 	mux.HandleFunc("GET /api/futures/scan", s.futuresScan)
 	mux.HandleFunc("POST /api/futures/backtest", s.futuresBacktest)
 	mux.HandleFunc("POST /api/futures/sweep", s.futuresSweep)
+	mux.HandleFunc("GET /api/futures/sweep/progress", s.futuresSweepProgress)
+	mux.HandleFunc("POST /api/futures/sweep/workers", s.futuresSweepWorkers)
 	mux.HandleFunc("POST /api/futures/watch/start", s.futuresWatchStart)
 	mux.HandleFunc("GET /api/futures/watch/config", s.futuresWatchConfigGet)
 	mux.HandleFunc("POST /api/futures/watch/config", s.futuresWatchConfigSave)
@@ -919,6 +933,13 @@ func (s *Server) futuresSweep(w http.ResponseWriter, r *http.Request) {
 	if err := futures.ValidateSweep(req); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	// 带 token 就建一个运行时句柄：前端能轮询进度，也能中途改并发
+	run := registerSweepRun(req.Token, req.Workers)
+	defer unregisterSweepRun(req.Token, run)
+	if run != nil {
+		req.Run = run
+		req.OnProgress = run.Report
 	}
 	res, err := futures.SweepWithSource(r.Context(), s.Bars, req)
 	if err != nil {

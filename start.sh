@@ -29,6 +29,48 @@ if [ ! -f .env ]; then
   echo "已生成 .env（可编辑 FEISHU_WEBHOOK_URL）"
 fi
 
+# 服务端口：优先环境变量，其次 .env 里的 HTTP_ADDR，最后 :8080
+serve_port() {
+  local addr="${HTTP_ADDR:-}"
+  if [ -z "$addr" ] && [ -f .env ]; then
+    addr="$(sed -n 's/^[[:space:]]*HTTP_ADDR[[:space:]]*=[[:space:]]*//p' .env | tail -n 1 | tr -d '[:space:]')"
+  fi
+  [ -z "$addr" ] && addr=":8080"
+  printf '%s' "${addr##*:}"
+}
+
+port_pids() {
+  local port="$1"
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -ti "tcp:$port" -sTCP:LISTEN 2>/dev/null || true
+  elif command -v ss >/dev/null 2>&1; then
+    ss -lptnH "sport = :$port" 2>/dev/null | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' || true
+  fi
+}
+
+# 端口上残留着上一次 go run 的 stock-x 时，新进程会 bind 失败直接退出，
+# 表现成「脚本说启动了，页面却没换」。这里先把它清掉再启动。
+clear_stale_server() {
+  local port pid name
+  port="$(serve_port)"
+  pid="$(port_pids "$port" | sort -u | head -n 1)"
+  [ -z "$pid" ] && return 0
+  name="$(ps -p "$pid" -o comm= 2>/dev/null || true)"
+  case "$name" in
+  *stock-x*)
+    echo "端口 $port 被上一次的 stock-x 进程占用（PID $pid），先停掉它..."
+    kill "$pid" 2>/dev/null || true
+    sleep 1
+    ;;
+  *)
+    echo "端口 $port 已被 PID $pid（${name:-未知进程}）占用，请先停掉它再运行。" >&2
+    exit 1
+    ;;
+  esac
+}
+
+clear_stale_server
+
 # 仅在 lockfile/package.json 比 node_modules 新，或目录缺失时才 npm install
 web_need_install() {
   [ ! -d web/node_modules ] && return 0
@@ -88,4 +130,6 @@ rm -rf internal/webembed/dist/*
 cp -R web/dist/. internal/webembed/dist/
 
 echo "启动服务 http://127.0.0.1${HTTP_ADDR:-:8080} ..."
+# serve 会在后台把期货 K 线写入本地 SQLite，并按空闲内存的约 70% 放进内存。
+# 1 分钟历史会慢慢补，可在「本地期货」页暂停。关掉多周期增量：FUTURES_SYNC=0
 exec go run ./cmd/stock-x serve

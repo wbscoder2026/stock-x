@@ -57,14 +57,14 @@ func Open(path string) (*Store, error) {
 			return nil, err
 		}
 	}
-	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(15000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)", filepath.ToSlash(path))
+	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(15000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=temp_store(MEMORY)", filepath.ToSlash(path))
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
 	db.SetMaxOpenConns(8)
 	db.SetMaxIdleConns(8)
-	if _, err := db.Exec(`PRAGMA busy_timeout = 15000; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;`); err != nil {
+	if _, err := db.Exec(`PRAGMA busy_timeout = 15000; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA temp_store = MEMORY;`); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -151,7 +151,10 @@ CREATE TABLE IF NOT EXISTS app_meta (
 	if _, err := s.db.Exec(futuresBlacklistDDL); err != nil {
 		return err
 	}
-	_, err := s.db.Exec(futuresWatchConfigDDL)
+	if _, err := s.db.Exec(futuresWatchConfigDDL); err != nil {
+		return err
+	}
+	_, err := s.db.Exec(futuresFavoriteDDL)
 	return err
 }
 

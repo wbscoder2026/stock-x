@@ -4,7 +4,42 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
+
+func TestLoadFuturesSyncDefaults(t *testing.T) {
+	t.Setenv("FUTURES_SYNC", "")
+	t.Setenv("FUTURES_SYNC_EVERY", "")
+	t.Setenv("FUTURES_SYNC_PERIODS", "")
+	t.Setenv("FUTURES_SYNC_WORKERS", "")
+	cfg := Load()
+	if !cfg.FuturesSync {
+		t.Fatal("默认应开启期货增量同步")
+	}
+	if cfg.FuturesSyncEvery != 30*time.Minute {
+		t.Fatalf("interval=%s", cfg.FuturesSyncEvery)
+	}
+	if cfg.FuturesSyncPeriods != "1d,5,15,30,60,120" {
+		t.Fatalf("periods=%q", cfg.FuturesSyncPeriods)
+	}
+	if cfg.FuturesSyncWorkers != 4 {
+		t.Fatalf("workers=%d", cfg.FuturesSyncWorkers)
+	}
+}
+
+func TestLoadFuturesSyncDisabled(t *testing.T) {
+	t.Setenv("FUTURES_SYNC", "0")
+	t.Setenv("FUTURES_SYNC_EVERY", "5m")
+	t.Setenv("FUTURES_SYNC_PERIODS", "1d,60")
+	t.Setenv("FUTURES_SYNC_WORKERS", "2")
+	cfg := Load()
+	if cfg.FuturesSync {
+		t.Fatal("FUTURES_SYNC=0 应关闭")
+	}
+	if cfg.FuturesSyncEvery != 5*time.Minute || cfg.FuturesSyncPeriods != "1d,60" || cfg.FuturesSyncWorkers != 2 {
+		t.Fatalf("%+v", cfg)
+	}
+}
 
 func TestLoadDefaults(t *testing.T) {
 	t.Setenv("HTTP_ADDR", "")

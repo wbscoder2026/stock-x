@@ -1,12 +1,14 @@
 package notify
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
 	"strings"
 	"testing"
+	"unicode/utf16"
 )
 
 func TestSendCard(t *testing.T) {
@@ -112,4 +114,111 @@ func TestNotifyDesktopCommand(t *testing.T) {
 func TestDesktopSupported(t *testing.T) {
 	// 只要求不 panic 且与当前系统一致（CI 上可能是 linux 无 notify-send）
 	_ = DesktopSupported()
+}
+
+// decodePowerShell 还原 -EncodedCommand 的内容（UTF-16LE 的 base64）。
+func decodePowerShell(t *testing.T, encoded string) string {
+	t.Helper()
+	raw, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatalf("不是合法 base64：%v", err)
+	}
+	if len(raw)%2 != 0 {
+		t.Fatalf("UTF-16LE 长度应为偶数：%d", len(raw))
+	}
+	units := make([]uint16, len(raw)/2)
+	for i := range units {
+		units[i] = uint16(raw[i*2]) | uint16(raw[i*2+1])<<8
+	}
+	return string(utf16.Decode(units))
+}
+
+// innerXML 从生成的脚本里解出真正喂给 WinRT 的 Toast XML。
+func innerXML(t *testing.T, script string) string {
+	t.Helper()
+	const open = `FromBase64String('`
+	i := strings.Index(script, open)
+	if i < 0 {
+		t.Fatalf("脚本里没有 base64 的 XML：%s", script)
+	}
+	rest := script[i+len(open):]
+	j := strings.Index(rest, `')`)
+	if j < 0 {
+		t.Fatalf("base64 没闭合：%s", script)
+	}
+	raw, err := base64.StdEncoding.DecodeString(rest[:j])
+	if err != nil {
+		t.Fatalf("XML base64 解不开：%v", err)
+	}
+	return string(raw)
+}
+
+func TestWindowsToastScript(t *testing.T) {
+	script := windowsToastScript(`焦"煤 & <测试>`, `向上突破 <1523.0>`, "Glass")
+	if !strings.Contains(script, "CreateToastNotifier") {
+		t.Fatalf("没调 CreateToastNotifier：%s", script)
+	}
+	xml := innerXML(t, script)
+	if !strings.Contains(xml, `<text>焦&quot;煤 &amp; &lt;测试&gt;</text>`) {
+		t.Fatalf("标题没做 XML 转义：%s", xml)
+	}
+	if !strings.Contains(xml, `向上突破 &lt;1523.0&gt;`) {
+		t.Fatalf("正文没做 XML 转义：%s", xml)
+	}
+	if !strings.Contains(xml, `template="ToastGeneric"`) {
+		t.Fatalf("模板不对：%s", xml)
+	}
+	if !strings.Contains(xml, "ms-winsoundevent:Notification.Default") {
+		t.Fatalf("给了 sound 就该带提示音：%s", xml)
+	}
+}
+
+func TestWindowsToastSilentWithoutSound(t *testing.T) {
+	xml := innerXML(t, windowsToastScript("标题", "正文", ""))
+	if !strings.Contains(xml, `<audio silent="true"/>`) {
+		t.Fatalf("sound 为空应静音：%s", xml)
+	}
+	if strings.Contains(xml, "ms-winsoundevent") {
+		t.Fatalf("不该带提示音：%s", xml)
+	}
+}
+
+func TestEncodePowerShellRoundTrip(t *testing.T) {
+	if got := decodePowerShell(t, encodePowerShell("Write-Host '焦煤'")); got != "Write-Host '焦煤'" {
+		t.Fatalf("UTF-16LE 往返不一致：%q", got)
+	}
+}
+
+func TestNotifyDesktopWindowsCommand(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("PowerShell 断言只在 Windows 有意义")
+	}
+	var gotName string
+	var gotArgs []string
+	orig := desktopRunner
+	desktopRunner = func(name string, args ...string) error {
+		gotName, gotArgs = name, args
+		return nil
+	}
+	t.Cleanup(func() { desktopRunner = orig })
+
+	if err := NotifyDesktop("焦煤 JM", "向上突破 1523.0", "Glass"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.ToLower(gotName), "powershell") {
+		t.Fatalf("应该用 powershell：%s", gotName)
+	}
+	if len(gotArgs) != 4 || gotArgs[2] != "-EncodedCommand" {
+		t.Fatalf("参数不对：%v", gotArgs)
+	}
+	script := decodePowerShell(t, gotArgs[3])
+	if !strings.Contains(script, "ToastNotificationManager") {
+		t.Fatalf("脚本里没有 Toast：%s", script)
+	}
+	if xml := innerXML(t, script); !strings.Contains(xml, "焦煤 JM") {
+		t.Fatalf("标题没进 XML：%s", xml)
+	}
+	if err := NotifyDesktop("", "b", ""); err == nil {
+		t.Fatal("空标题应报错")
+	}
 }

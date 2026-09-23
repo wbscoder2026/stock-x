@@ -88,6 +88,48 @@ export type FuturesVariety = {
   exchange: string
 }
 
+export type FuturesLocalPeriod = {
+  period: string
+  bars: number
+  first: string
+  last: string
+}
+
+export type FuturesLocalVariety = {
+  prefix: string
+  name: string
+  symbol: string
+  periods: FuturesLocalPeriod[]
+}
+
+export type FuturesBackfillStatus = {
+  paused: boolean
+  running: boolean
+  mode: string
+  prefix: string
+  name: string
+  period: string
+  from: string
+  to: string
+  oldest: string
+  saved: number
+  message: string
+  queued: number
+}
+
+export type FuturesMemoryView = {
+  used_bytes: number
+  budget_bytes: number
+  free_bytes: number
+  fraction: number
+}
+
+export type FuturesLocalReport = {
+  items: FuturesLocalVariety[]
+  backfill: FuturesBackfillStatus
+  memory: FuturesMemoryView
+}
+
 export type FuturesContract = {
   symbol: string
   name: string
@@ -269,6 +311,20 @@ export type FuturesSweepRequest = {
   min_trades?: number
   limit?: number
   workers?: number
+  // 进度令牌：带上它服务端才会把进度登记下来，前端就能轮询画进度条
+  token?: string
+}
+
+export type FuturesSweepProgress = {
+  running: boolean
+  done: number
+  total: number
+  workers: number // 当前实际并发（中途改过就是改后的值）
+}
+
+export type FuturesSweepWorkersResult = {
+  running: boolean
+  workers: number
 }
 
 export type FuturesSweepObjective = 'win_rate' | 'avg_return' | 'avg_r' | 'profit_factor'
@@ -320,6 +376,83 @@ export type FuturesBacktestResult = {
   to?: string
   items: FuturesOutcome[]
   bars?: FuturesKlineBar[]
+}
+
+export type FuturesFavorite = {
+  id: number
+  name: string
+  note: string
+  params: FuturesParams
+  origin_symbol: string
+  origin_win_rate: number
+  origin_avg_return: number
+  origin_avg_r: number
+  origin_profit_factor: number
+  origin_trades: number
+  created_at: string
+  updated_at: string
+}
+
+export type FuturesFavoriteInput = {
+  name: string
+  note?: string
+  params: FuturesParams
+  origin_symbol?: string
+  origin_win_rate?: number
+  origin_avg_return?: number
+  origin_avg_r?: number
+  origin_profit_factor?: number
+  origin_trades?: number
+}
+
+export type FuturesSymbolStat = {
+  symbol: string
+  name: string
+  trades: number
+  correct: number
+  win_rate: number
+  avg_return: number
+  avg_r: number
+  profit_factor: number
+  error?: string
+}
+
+export type FuturesConfigScan = {
+  id: number
+  name: string
+  params: FuturesParams
+  symbols: number
+  covered: number
+  reliable: number
+  no_sample: number
+  failed: number
+  total_trades: number
+  total_correct: number
+  avg_win_rate: number
+  avg_return: number
+  avg_r: number
+  avg_profit_factor: number
+  pooled_win_rate: number
+  pooled_avg_return: number
+  details: FuturesSymbolStat[]
+}
+
+export type FuturesAcrossScan = {
+  symbols: number
+  min_trades: number
+  configs: FuturesConfigScan[]
+  overall: {
+    configs: number
+    avg_win_rate: number
+    avg_return: number
+    avg_r: number
+    avg_profit_factor: number
+    pooled_win_rate: number
+    pooled_avg_return: number
+    total_trades: number
+  }
+  skipped?: string[]
+  elapsed_ms: number
 }
 
 export type BacktestResult = {

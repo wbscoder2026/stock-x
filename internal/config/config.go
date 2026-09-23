@@ -5,6 +5,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Config 为进程级运行配置，由环境变量加载。
@@ -15,6 +16,11 @@ type Config struct {
 	FeishuWebhook string
 	CronSpec      string // 默认 15 19 * * 1-5
 	Workers       int    // 默认 4，上限见 syncer.maxWorkers
+	// 服务启动后在后台把期货 K 线增量写入本地库，并装进内存给扫描用。
+	FuturesSync        bool
+	FuturesSyncEvery   time.Duration
+	FuturesSyncPeriods string
+	FuturesSyncWorkers int
 }
 
 // Load 读取环境变量；若存在 .env 则先填入尚未设置的键（不覆盖已有环境变量）。
@@ -27,13 +33,54 @@ func Load() Config {
 		}
 	}
 	return Config{
-		HTTPAddr:      getenv("HTTP_ADDR", ":8080"),
-		DBPath:        getenv("DB_PATH", "data/stock-x.db"),
-		StartDate:     getenv("START_DATE", "2024-01-01"),
-		FeishuWebhook: strings.TrimSpace(os.Getenv("FEISHU_WEBHOOK_URL")),
-		CronSpec:      getenv("CRON_SPEC", "15 19 * * 1-5"),
-		Workers:       workers,
+		HTTPAddr:           getenv("HTTP_ADDR", ":8080"),
+		DBPath:             getenv("DB_PATH", "data/stock-x.db"),
+		StartDate:          getenv("START_DATE", "2024-01-01"),
+		FeishuWebhook:      strings.TrimSpace(os.Getenv("FEISHU_WEBHOOK_URL")),
+		CronSpec:           getenv("CRON_SPEC", "15 19 * * 1-5"),
+		Workers:            workers,
+		FuturesSync:        getenvBool("FUTURES_SYNC", true),
+		FuturesSyncEvery:   getenvDuration("FUTURES_SYNC_EVERY", 30*time.Minute),
+		FuturesSyncPeriods: getenv("FUTURES_SYNC_PERIODS", "1d,5,15,30,60,120"),
+		FuturesSyncWorkers: getenvInt("FUTURES_SYNC_WORKERS", 4),
 	}
+}
+
+func getenvBool(key string, def bool) bool {
+	v, ok := os.LookupEnv(key)
+	if !ok || strings.TrimSpace(v) == "" {
+		return def
+	}
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return true
+	}
+}
+
+func getenvDuration(key string, def time.Duration) time.Duration {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return def
+	}
+	return d
+}
+
+func getenvInt(key string, def int) int {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return def
+	}
+	return n
 }
 
 func getenv(key, def string) string {

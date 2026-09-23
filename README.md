@@ -11,11 +11,26 @@ A 股选股系统：Go 1.26+ 后端 + React 前端。灵感来自 [Sequoia-X](ht
 
 ## 一键启动
 
+macOS / Linux（`start.sh`）：
+
 ```bash
 chmod +x start.sh
 ./start.sh          # 构建前端并在 :8080 提供 API + 页面
 ./start.sh dev      # 开发：Vite :5173 反代 /api → :8080
 ```
+
+Windows（`start.cmd`，可直接双击；它内部用 `-ExecutionPolicy Bypass` 调 `start.ps1`，不受脚本执行策略限制）：
+
+```powershell
+.\start.cmd          # 构建前端并在 :8080 提供 API + 页面
+.\start.cmd dev      # 开发：Vite :5173 反代 /api → :8080（等价 SET START_DEV=1）
+```
+
+两个脚本做的事完全一样：校验 Go >= 1.26 → 首次生成 `.env` → 按需 `npm install` → 按需 `npm run build` → 同步 `web/dist` 到 `internal/webembed/dist` → `go run ./cmd/stock-x serve`。`make build` / `make dev` 会自动挑当前系统的那个。
+
+> 前端依赖固定走国内镜像：`web/.npmrc` 设了 `registry=https://registry.npmmirror.com`，并且**关掉了 `proxy` / `https-proxy`**——因为 `package-lock.json` 里的 `resolved` 全写成 `registry.npmjs.org`，如果同时开着全局代理（如 `127.0.0.1:10809`），上百个 tarball 会挤在一条代理链路上并发下载，表现为 `npm install` 长时间卡住。镜像在国内，直连更快。若你的网络必须经代理出网，删掉 `web/.npmrc` 里的 `proxy=false` / `https-proxy=false` 两行即可。
+
+> **端口被别的本地应用「占用」过？** 如果 `127.0.0.1:8080` 以前跑过别的本地 Web 应用（尤其是带 Service Worker 的 PWA），浏览器会按 **origin** 把那个 Service Worker 一直留着，于是不管后端换成什么，页面永远是旧应用 —— 此时 `curl` 能拿到新页面，浏览器却不行。处理办法（任选）：换端口（`.env` 里改 `HTTP_ADDR=:8090`）、用 `http://localhost:8080` 访问（和 `127.0.0.1` 是不同 origin）、或在浏览器里注销该 Service Worker（Edge/Chrome 的 `edge://serviceworker-internals` / `chrome://serviceworker-internals`）。
 
 首次选股前先回填：
 
@@ -59,7 +74,9 @@ go run ./cmd/stock-x futures-backfill   # 期货日线往前翻页挖历史
 | `GET /api/futures/watch/events?since=N` | 增量提醒（`fresh=true` = 刚发生 → 前端弹窗） |
 | `POST /api/futures/watch/alert/test` | 当场验证提醒通道（body: `{"feishu":true,"desktop":true}`） |
 | `GET/POST/DELETE /api/futures/blacklist` | 监控黑名单：`scope=variety`（整个品种，如 JM）或 `contract`（单合约，如 JM2701） |
-| `POST /api/futures/sweep` | **参数扫描**：每个参数给一组候选值，跑笛卡尔积找最优组合 |
+| `POST /api/futures/sweep` | **参数扫描**：每个参数给一组候选值，跑笛卡尔积找最优组合。body 里带 `token` 会顺便登记进度 |
+| `GET /api/futures/sweep/progress?token=` | 扫描进度（`running` / `done` / `total` / `workers`），前端每 500ms 轮询画进度条；请求返回即注销 |
+| `POST /api/futures/sweep/workers` | 扫描途中改并发（`{token, workers}`）→ 当场 `Tune` 协程池；没在跑则只回带规整后的值 |
 
 **监控黑名单**：提醒列表每行有「加入黑名单」按钮 → 弹出模态框二选一（只屏蔽该合约 / 屏蔽整个品种的所有合约）+ 可选备注；命中的品种/合约**不再进入突破提醒列表**（单品种扫描、回测、`futures-sync` 都不受影响）。黑名单持久化在 SQLite（`futures_blacklist` 表），重启仍生效；卡片上的「黑名单(N)」按钮可查看/移除。品种级立即生效（直接从扫描范围剔除），合约级按「当前主力合约」判断——换月后自动放行。
 
@@ -77,12 +94,13 @@ go run ./cmd/stock-x futures-backfill   # 期货日线往前翻页挖历史
 
 - **同一级别只取一次 K 线**，该级别的所有组合共用（否则 N 个组合 = N 次上游请求）；**级别做轴时每个级别各取一次数**（顺序取，避免把上游打限流；日线共用一次）。组合之间互相独立 → worker 池并行（实测 31ms/组合，72 组合 0.6s；串行要 2.2s）。
 - 某个级别取不到数据（上游没这段历史）**只跳过它**并在 `skipped` 里说明，不拖垮整次扫描；结果回带 `period_bars`（各级别 K 线根数）——上游分钟线只留最近约 1000 根，**15 分钟 ≈ 1 个月、60 分钟 ≈ 5 个月，样本数差好几倍，不能直接横向比**。
-- 组合数上限按「级别 × 参数组合」总数算（默认 **10000**，`limit` 可调）；实测级别差异往往**比参数微调影响更大**：焦煤 30 分钟期望 R 0.74，而 5 分钟只有 0.22；白银只有 60 分钟为正（0.28），15/30 分钟都是负的。
+- 组合数上限按「级别 × 参数组合」总数算（默认 **10000000**，1000 万，`limit` 可调）；实测级别差异往往**比参数微调影响更大**：焦煤 30 分钟期望 R 0.74，而 5 分钟只有 0.22；白银只有 60 分钟为正（0.28），15/30 分钟都是负的。
 - `objective` 支持 `win_rate` / `avg_return` / `avg_r`（期望 R，最值得看）/ `profit_factor`，`rows` 按「**可靠组合优先** → 目标降序 → 样本数降序」返回（前端可再按列排序），`best` 就是第一行。
 - **样本不足的组合标 `reliable=false`**：3 笔 100% 胜率不算本事，不会盖过可靠组合——这是防过拟合的关键。
 - **结果表排序**：表头可点，自己接管排序（不依赖 antd v6 的内置 sorter），降序/升序切换、全量行参与排序；配「只看样本足」开关默认隐藏样本不足的组合（避免被 3 笔 100% 胜率带偏）。
-- **并发可调**：`workers`（0 = 自动用满核数，上限 64）。扫描是纯计算、组合互相独立 → worker 池并行，**并发不影响结果**（1 并发与多并发结果完全一致，有测试盯着）。实测 1000 组 / 1000 根 K 线：1 并发 31s → 4 并发 13s → 8 并发 9s → 11 并发 7s，**4~8 是性价比拐点**（再往上抢内存带宽，收益递减）。客户端断开/刷新会取消计算（context 传到 worker 池），不会白烧 CPU。
-- 组合数上限 **10000**（`limit` 可调），超限错误会写清「几个级别 × 几组参数」；参数错误一律 400，取数/数据问题才是 502。
+- **并发可调（扫描途中也能改）**：`workers`（**默认 64**，上限 64；填 0 = 自动用满核数）。跑的是 [ants](https://github.com/panjf2000/ants) 协程池，`POST /api/futures/sweep/workers {token, workers}` 会当场 `Tune` —— **正在跑的任务不打断，之后提交的任务按新并发上**（调小则等当前任务跑完自然收敛）。因为 ants 的 `Submit` 在池满时阻塞，内存里同时挂着的任务数 ≈ 并发数而不是组合数（千万组也不会把任务全堆进内存），而且容量一涨阻塞的提交立刻就能用上。扫描是纯计算、组合互相独立 → **并发不影响结果**（1 并发与多并发结果完全一致，有测试盯着）。实测 1000 组 / 1000 根 K 线：1 并发 31s → 4 并发 13s → 8 并发 9s → 11 并发 7s。客户端断开/刷新会取消计算（context 传到协程池），不会白烧 CPU。
+- **扫描进度与「切页不丢」**：请求体里带 `token` 时，服务端每跑完一个组合就把 `done` 记下来（`sweepOver` 的 `OnProgress` 回调 → `GET /api/futures/sweep/progress?token=`），前端每 500ms 轮询画进度条：已跑 / 总数 + 按**本次实测速度**外推的剩余时间（比拿上一次的 msPerCombo 估更准）。前端把扫描的表单 / 进度 / 结果 / 排序都放在模块级 store（`web/src/sweepStore.ts`），所以**切到监控页再回来，进度和结果都还在**；只有**刷新页面**才会取消请求（SPA 切页不会）。
+- 组合数上限 **10000000**（1000 万，`limit` 可调），超限错误会写清「几个级别 × 几组参数」；参数错误一律 400，取数/数据问题才是 502。上限放到千万级后，真正跑不跑得完取决于内存与耗时：每个组合都要留一份 `Params` + `SweepRow`（千万组约几个 GB），单核实测约 31ms/组合，请配合 `workers` 用。
 
 **回测时间范围（`from` / `to`）**：按**信号时间**筛选（含边界），支持 `2006-01-02`（当天整天）或 `2006-01-02 15:04`，界面用带时间的范围选择器 + 「近1月 / 近3月 / 不限」快捷按钮。三个约定：
 
@@ -116,7 +134,7 @@ go run ./cmd/stock-x futures-backfill   # 期货日线往前翻页挖历史
 | 站内弹窗 | 页面开着 | antd notification，不自动消失 |
 | 浏览器原生通知 | 页面/标签在后台 + 浏览器已授权 | 首次开启监控时申请权限 |
 | **飞书推送** | 服务端 `FEISHU_WEBHOOK_URL` | 服务端卡片推送，关掉浏览器也能收到；未配置时状态栏会提示 |
-| **桌面通知** | 服务端所在机器（macOS 通知中心 / Linux `notify-send`） | 带提示音，`osascript display notification`，不需要浏览器 |
+| **桌面通知** | 服务端所在机器（macOS 通知中心 / Linux `notify-send` / Windows 操作中心） | 带提示音，不需要浏览器。macOS 走 `osascript display notification`，Linux 走 `notify-send`，Windows 走系统自带的 Windows PowerShell 调 WinRT `ToastNotificationManager`（`powershell -EncodedCommand`，标题正文以 base64 塞进 Toast XML，任何字符都不会破坏脚本） |
 
 提醒列表会显示**主力月份合约**（如 `RB/2701`）；合约由新浪行情中心的持仓量异步解析（每个品种当天只查一次，不拖慢扫描）。**点任意一行** → 自动切到该月份合约 + 监控所在级别，加载价格图并画出关键位（`bars_period` 支持 5/15/30/60/120 各级别）。
 
@@ -148,7 +166,9 @@ go run ./cmd/stock-x futures-backfill --periods=1d --pages=4       # 日线往�
 ```
 
 - 网络只拉一个窗口（上游接口限制），本地按 `symbol+period+ts` upsert 去重：**第二次跑新增 0 根**（实测 2 品种 × 2 周期：首次 +9569 根，第二次 +0）
-- `POST /api/futures/backtest`（前端「回测突破对错」）改为**本地优先**：本地有数据就完全不走网络，缺了才拉多源并回写本地
+- `./start.sh` 拉起的 `serve` 会在后台做两件事：① 每 30 分钟增量同步 `1d,5,15,30,60,120`（`FUTURES_SYNC=0` 可关）；② 单独慢慢补 **1 分钟**历史，一次只打一页、请求间隔约 600ms。页面「本地期货」能看到每个品种补到哪一天，也可以暂停、继续，或指定品种和时间范围插队
+- 内存缓存按**当前空闲内存的 70%**自动伸缩，不写死根数。扫描和回测仍是内存优先，其次 SQLite，两边都有就不再为这段历史打接口
+- 参数扫描的每个组合只算统计，不再为每组复制一整段图表 K 线，避免并行时把行情数据在内存里翻很多份
 - 分钟线上游只保留最近约 1000 根（东财）/ 约 2 个月（新浪），本地库靠**持续增量**越攒越厚；日线可翻页挖到十几年前（新浪日线本身也回溯到 2013 年）
 - 实时监控不受影响：它必须看最新行情，仍走多源实时链路（`internal/futures/source.go`）
 

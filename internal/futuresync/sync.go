@@ -34,6 +34,7 @@ type Options struct {
 	Pages      int       // 深挖页数，默认 4
 	Start      time.Time // 深挖到该日期就停（零值 = 只看页数）
 	MinuteBars int       // 分钟线单次窗口（默认 1000）
+	Cache      *BarCache // 非空时，写库成功后把增量并进内存
 	Progress   func(done, total int, msg string)
 }
 
@@ -57,9 +58,9 @@ func ParsePeriods(raw string) ([]string, error) {
 		}
 		if p != DailyPeriod {
 			switch p {
-			case "5", "15", "30", "60", "120":
+			case "1", "5", "15", "30", "60", "120":
 			default:
-				return nil, fmt.Errorf("非法周期 %s（可选 5/15/30/60/120/1d）", p)
+				return nil, fmt.Errorf("非法周期 %s（可选 1/5/15/30/60/120/1d）", p)
 			}
 		}
 		if !seen[p] {
@@ -270,14 +271,19 @@ func syncOne(
 		}
 		rows := rowsFromDays(symbol, days)
 		fetched = len(rows)
+		savedRows := rows
 		if hasLast {
-			rows = rowsAfter(rows, last)
+			savedRows = rowsAfter(rows, last)
 		}
-		if len(rows) == 0 {
+		if len(savedRows) == 0 {
 			return fetched, 0, nil
 		}
-		n, err := st.UpsertFuturesBars(rows)
-		return fetched, n, err
+		n, err := st.UpsertFuturesBars(savedRows)
+		if err != nil {
+			return fetched, 0, err
+		}
+		touchCache(opts.Cache, symbol, DailyPeriod, rows, hasLast, savedRows)
+		return fetched, n, nil
 	}
 
 	bars, err := fetchMinuteWindow(ctx, pool, v, period, opts.MinuteBars)
@@ -286,14 +292,19 @@ func syncOne(
 	}
 	rows := rowsFromBars(symbol, period, bars)
 	fetched = len(rows)
+	savedRows := rows
 	if hasLast {
-		rows = rowsAfter(rows, last)
+		savedRows = rowsAfter(rows, last)
 	}
-	if len(rows) == 0 {
+	if len(savedRows) == 0 {
 		return fetched, 0, nil
 	}
-	n, err := st.UpsertFuturesBars(rows)
-	return fetched, n, err
+	n, err := st.UpsertFuturesBars(savedRows)
+	if err != nil {
+		return fetched, 0, err
+	}
+	touchCache(opts.Cache, symbol, period, rows, hasLast, savedRows)
+	return fetched, n, nil
 }
 
 // syncDailyDeep 从最新往前翻页挖日线历史：第一页只补新，后续页补更老的历史。
@@ -330,6 +341,11 @@ func syncDailyDeep(
 				return fetched, saved, uerr
 			}
 			saved += n
+			if page == 0 {
+				touchCache(opts.Cache, symbol, DailyPeriod, rows, hasLast, toSave)
+			} else {
+				touchCache(opts.Cache, symbol, DailyPeriod, rows, true, rows)
+			}
 		}
 
 		oldest := rows[0].Time

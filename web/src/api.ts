@@ -8,8 +8,15 @@ import type {
   FuturesContract,
   FuturesParams,
   FuturesSnapshot,
+  FuturesSweepProgress,
   FuturesSweepRequest,
   FuturesSweepResult,
+  FuturesSweepWorkersResult,
+  FuturesAcrossScan,
+  FuturesBackfillStatus,
+  FuturesFavorite,
+  FuturesFavoriteInput,
+  FuturesLocalReport,
   FuturesVariety,
   FuturesWatchAlert,
   FuturesWatchConfig,
@@ -162,8 +169,57 @@ export function fetchFuturesVarieties() {
   return apiGet<FuturesVariety[]>('/api/futures/varieties')
 }
 
+export function fetchFuturesLocal() {
+  return apiGet<FuturesLocalReport>('/api/futures/local')
+}
+
+export function postFuturesLocalBackfill(body: { prefix: string; from?: string; to?: string }) {
+  return apiSend<FuturesBackfillStatus>('/api/futures/local/backfill', 'POST', body)
+}
+
+export function pauseFuturesLocal() {
+  return apiSend<FuturesBackfillStatus>('/api/futures/local/pause', 'POST', {})
+}
+
+export function resumeFuturesLocal() {
+  return apiSend<FuturesBackfillStatus>('/api/futures/local/resume', 'POST', {})
+}
+
+export function fetchFuturesFavorites() {
+  return apiGet<FuturesFavorite[]>('/api/futures/favorites')
+}
+
+export function postFuturesFavorites(items: FuturesFavoriteInput[]) {
+  return apiSend<FuturesFavorite[]>('/api/futures/favorites', 'POST', { items })
+}
+
+export function putFuturesFavorite(id: number, body: FuturesFavoriteInput) {
+  return apiSend<FuturesFavorite>(`/api/futures/favorites/${id}`, 'PUT', body)
+}
+
+export function deleteFuturesFavorite(id: number) {
+  return apiSend<{ removed: number }>(`/api/futures/favorites/${id}`, 'DELETE')
+}
+
+export function deleteFuturesFavorites(ids: number[]) {
+  return apiSend<{ removed: number }>('/api/futures/favorites/delete', 'POST', { ids })
+}
+
+export function scanFuturesFavorites(body: { ids: number[]; workers?: number; min_trades?: number }) {
+  return apiSend<FuturesAcrossScan>('/api/futures/favorites/scan', 'POST', body)
+}
+
 export function postFuturesSweep(body: FuturesSweepRequest) {
   return apiSend<FuturesSweepResult>('/api/futures/sweep', 'POST', body)
+}
+
+export function fetchFuturesSweepProgress(token: string) {
+  return apiGet<FuturesSweepProgress>(`/api/futures/sweep/progress?token=${encodeURIComponent(token)}`)
+}
+
+// 扫描途中改并发（服务端会立刻 Tune 协程池）
+export function updateFuturesSweepWorkers(token: string, workers: number) {
+  return apiSend<FuturesSweepWorkersResult>('/api/futures/sweep/workers', 'POST', { token, workers })
 }
 
 export function fetchFuturesContracts(prefix: string) {

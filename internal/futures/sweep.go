@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -30,8 +31,10 @@ const (
 )
 
 const (
-	// SweepDefaultLimit 一次最多跑多少组合（挡住手滑，也保证响应时间可控）
-	SweepDefaultLimit = 10000
+	// SweepDefaultLimit 一次最多跑多少组合（只挡明显的手滑）。
+	// 千万级上限下，"能不能跑完"由内存和耗时决定：每个组合都要留一份
+	// Params + SweepRow（千万组约几个 GB），单核实测约 31ms/组合 —— 配合 workers 用。
+	SweepDefaultLimit = 10000000
 	// SweepDefaultMinTrades 少于这个样本数的组合标记「样本不足」
 	SweepDefaultMinTrades = 20
 	// SweepDefaultPeriod 不指定级别时用哪个
@@ -65,10 +68,19 @@ type SweepRequest struct {
 	MinTrades   int       `json:"min_trades"` // 少于这个样本数标记「样本不足」
 	Limit       int       `json:"limit"`      // 组合数上限
 	Workers     int       `json:"workers"`    // 并发数，0 = 自动（CPU 核数），上限 64
+	// Token 进度令牌：非空时服务端会把进度登记下来，前端用
+	// GET /api/futures/sweep/progress?token= 轮询（见 internal/api）。
+	Token string `json:"token"`
+	// OnProgress 每跑完一个组合回调一次（done 由 0 涨到 total，total 在开跑时确定）。
+	// 只给服务端上报进度用，不参与 JSON。
+	OnProgress func(done, total int) `json:"-"`
+	// Run 运行时句柄：绑上它之后并发可以中途 SetWorkers 实时调、进度随时可读。
+	// nil = 按固定 Workers 跑完拉倒。同样不参与 JSON。
+	Run *SweepRun `json:"-"`
 }
 
-// normalizeWorkers 并发数：0/负数 → CPU 核数；超过上限 → 截到上限。
-func normalizeWorkers(n int) int {
+// NormalizeSweepWorkers 并发数：0/负数 → CPU 核数；超过上限 → 截到上限。
+func NormalizeSweepWorkers(n int) int {
 	if n <= 0 {
 		n = runtime.NumCPU()
 	}
@@ -145,7 +157,7 @@ func normalizeSweep(req SweepRequest) (SweepRequest, error) {
 	if req.Limit <= 0 {
 		req.Limit = SweepDefaultLimit
 	}
-	req.Workers = normalizeWorkers(req.Workers)
+	req.Workers = NormalizeSweepWorkers(req.Workers)
 	if err := ValidateBacktestParams(Params{From: req.From, To: req.To}); err != nil {
 		return req, err
 	}
@@ -375,7 +387,7 @@ func sortSweepRows(rows []SweepRow, objective string) []SweepRow {
 
 // sweepOne 跑一个组合。纯函数（只读 K 线），所以可以并发跑多个组合。
 func sweepOne(ds sweepDataset, params Params, minTrades int) SweepRow {
-	res := BacktestBars(ds.minutes, ds.daily, params)
+	res := runBacktest(ds.minutes, ds.daily, params, false)
 	return SweepRow{
 		Params:       params,
 		Trades:       res.Trades,
@@ -411,38 +423,67 @@ func sweepOver(ctx context.Context, datasets []sweepDataset, p SweepRequest) Swe
 	}
 	rows = make([]SweepRow, len(paramsOf))
 
-	workers := normalizeWorkers(p.Workers)
+	// 进度上报：先把 total 报出去，前端才能画进度条（组合数要到这里才知道）
+	total := len(paramsOf)
+	progress := p.OnProgress
+	var done atomic.Int64
+	if progress != nil {
+		progress(0, total)
+	}
+
+	// 并发：带着句柄就以句柄里的期望值为准（用户可能在建池之前就改过并发）
+	workers := NormalizeSweepWorkers(p.Workers)
+	if p.Run != nil {
+		workers = p.Run.Workers()
+	}
 	if workers > len(jobs) {
 		workers = len(jobs)
 	}
 	if workers < 1 {
 		workers = 1
 	}
-	queue := make(chan job)
-	var wg sync.WaitGroup
-	for w := 0; w < workers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := range queue {
-				if ctx.Err() != nil { // 客户端断开 / 取消 → 立刻停手，别白烧 CPU
-					rows[j.combo] = SweepRow{Params: paramsOf[j.combo]}
-					continue
-				}
-				rows[j.combo] = sweepOne(datasets[j.ds], paramsOf[j.combo], p.MinTrades)
-			}
-		}()
+
+	pool, err := newSweepPool(workers) // 建池失败不该让整次扫描挂掉 → 退化成串行
+	if err != nil {
+		pool = nil
 	}
-	go func() { // 投喂任务；取消时及时收工，避免卡在 channel 上
-		defer close(queue)
-		for _, j := range jobs {
-			select {
-			case queue <- j:
-			case <-ctx.Done():
-				return
-			}
+	if pool != nil {
+		defer pool.Release()
+		if p.Run != nil {
+			// 绑上句柄：这之后 SetWorkers 会直接 Tune 这个池
+			p.Run.bindPool(pool)
+			defer p.Run.releasePool()
 		}
-	}()
+	}
+
+	execute := func(j job) {
+		if ctx.Err() != nil { // 客户端断开 / 取消 → 立刻停手，别白烧 CPU
+			rows[j.combo] = SweepRow{Params: paramsOf[j.combo]}
+			return
+		}
+		rows[j.combo] = sweepOne(datasets[j.ds], paramsOf[j.combo], p.MinTrades)
+		if progress != nil {
+			progress(int(done.Add(1)), total)
+		}
+	}
+
+	var wg sync.WaitGroup
+	for _, j := range jobs {
+		if ctx.Err() != nil {
+			break
+		}
+		if pool == nil {
+			execute(j)
+			continue
+		}
+		wg.Add(1)
+		// 池满时 Submit 会阻塞：既是背压（内存里只挂 ~并发数 个任务），
+		// 也是 Tune 能立刻见效的原因（容量一涨，这里立刻能继续提交）
+		if err := pool.Submit(func() { defer wg.Done(); execute(j) }); err != nil {
+			wg.Done()
+			break
+		}
+	}
 	wg.Wait()
 
 	rows = sortSweepRows(rows, p.Objective)

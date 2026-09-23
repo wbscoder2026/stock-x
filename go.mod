@@ -3,6 +3,7 @@ module github.com/wbscoder2026/stock-x
 go 1.26
 
 require (
+	github.com/panjf2000/ants/v2 v2.12.1
 	github.com/robfig/cron/v3 v3.0.1
 	modernc.org/sqlite v1.34.5
 )
@@ -13,6 +14,7 @@ require (
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-strftime v0.1.9 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
+	golang.org/x/sync v0.11.0 // indirect
 	golang.org/x/sys v0.22.0 // indirect
 	modernc.org/libc v1.55.3 // indirect
 	modernc.org/mathutil v1.6.0 // indirect

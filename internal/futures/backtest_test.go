@@ -72,6 +72,34 @@ func TestBacktestCorrectness(t *testing.T) {
 	}
 }
 
+func TestBacktestStatsSkipChartBars(t *testing.T) {
+	prev := warmup("2024-06-03", 30)
+	day := "2024-06-04"
+	today := make([]Bar, 12)
+	for i := range today {
+		today[i] = bar(ts(day, 9, 5+i*5), 90, 92, 88, 90, 10000)
+	}
+	today[6] = bar(ts(day, 9, 5+6*5), 90, 113, 88, 112, 20000)
+	for i := 7; i < len(today); i++ {
+		today[i] = bar(ts(day, 9, 5+i*5), 112, 121, 111, 120, 10000)
+	}
+	minutes := append(prev, today...)
+	daily := []Daily{{Date: ts("2024-06-03", 0, 0), High: 100, Low: 80, Close: 90}}
+	p := Params{Period: "15", HoldBars: 2, Donchian: 50, VolRatio: 1.5}
+
+	full := runBacktest(minutes, daily, p, true)
+	stats := runBacktest(minutes, daily, p, false)
+	if len(full.Bars) == 0 {
+		t.Fatal("完整回测应带出 K 线")
+	}
+	if len(stats.Bars) != 0 {
+		t.Fatalf("扫描用的统计回测不该复制整段 K 线：%d", len(stats.Bars))
+	}
+	if stats.Trades != full.Trades || stats.WinRate != full.WinRate || stats.AvgReturn != full.AvgReturn || stats.ProfitFactor != full.ProfitFactor {
+		t.Fatalf("统计结果应与完整回测一致：stats=%+v full=%+v", stats, full)
+	}
+}
+
 func TestEvaluateSkipsTail(t *testing.T) {
 	bars := []Bar{
 		bar(ts("2024-06-04", 9, 5), 1, 1, 1, 100, 1),

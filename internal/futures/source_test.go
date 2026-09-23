@@ -91,6 +91,28 @@ func TestEastmoneyMinuteFieldOrder(t *testing.T) {
 	}
 }
 
+func TestEastmoneyMinuteRangeUsesOneMinuteAndEnd(t *testing.T) {
+	var klt, end string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		klt = r.URL.Query().Get("klt")
+		end = r.URL.Query().Get("end")
+		_, _ = w.Write([]byte(`{"rc":0,"data":{"code":"rbm","market":113,"klines":["2026-09-18 09:01,100,101,102,99,10,20"]}}`))
+	}))
+	t.Cleanup(srv.Close)
+	src := NewEastmoneySource(srv.URL)
+	stop := time.Date(2026, 9, 18, 0, 0, 0, 0, locCST)
+	bars, err := src.MinuteRange(context.Background(), mustVariety(t, "RB"), "1", stop, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if klt != "1" || end != "20260918" {
+		t.Fatalf("klt=%s end=%s", klt, end)
+	}
+	if len(bars) != 1 || bars[0].Close != 101 {
+		t.Fatalf("%+v", bars)
+	}
+}
+
 func TestEastmoneyDailyParse(t *testing.T) {
 	payload := `{"rc":0,"data":{"code":"rbm","market":113,"name":"螺纹钢主连","klines":[` +
 		`"2026-09-18,3123,3096,3132,3089,884858,27472875776"]}}`

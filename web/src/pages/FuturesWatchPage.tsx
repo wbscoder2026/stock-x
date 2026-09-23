@@ -609,7 +609,7 @@ export default function FuturesWatchPage() {
               <Switch size="small" checked={alertFeishu} onChange={setAlertFeishu} />
             </span>
           </Tooltip>
-          <Tooltip title="服务端所在机器弹系统通知（macOS 通知中心 / Linux notify-send），带提示音；不依赖浏览器">
+          <Tooltip title="服务端所在机器弹系统通知（macOS 通知中心 / Linux notify-send / Windows 操作中心 Toast），带提示音；不依赖浏览器">
             <span className="param-label">
               桌面通知
               <Switch size="small" checked={alertDesktop} onChange={setAlertDesktop} />
