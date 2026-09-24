@@ -10,6 +10,8 @@ import FuturesBacktestPage from './pages/FuturesBacktestPage'
 import FuturesWatchPage from './pages/FuturesWatchPage'
 import FuturesLocalPage from './pages/FuturesLocalPage'
 import FuturesFavoritesPage from './pages/FuturesFavoritesPage'
+import FuturesOverviewPage from './pages/FuturesOverviewPage'
+import FuturesTicker from './components/FuturesTicker'
 
 const items = [
   { key: '/picks', label: '选股' },
@@ -19,6 +21,7 @@ const items = [
   { key: '/jobs', label: '任务/回填' },
   { key: '/backtest', label: '回测' },
   { key: '/futures/backtest', label: '期货回测' },
+  { key: '/futures/overview', label: '期货总览' },
   { key: '/futures/favorites', label: '期货收藏' },
   { key: '/futures/watch', label: '期货监控' },
   { key: '/futures/local', label: '本地期货' },
@@ -59,11 +62,13 @@ export default function App() {
           <Route path="/backtest" element={<BacktestPage />} />
           <Route path="/futures" element={<Navigate to="/futures/backtest" replace />} />
           <Route path="/futures/backtest" element={<FuturesBacktestPage />} />
+          <Route path="/futures/overview" element={<FuturesOverviewPage />} />
           <Route path="/futures/favorites" element={<FuturesFavoritesPage />} />
           <Route path="/futures/watch" element={<FuturesWatchPage />} />
           <Route path="/futures/local" element={<FuturesLocalPage />} />
         </Routes>
       </Layout.Content>
+      <FuturesTicker />
     </Layout>
   )
 }

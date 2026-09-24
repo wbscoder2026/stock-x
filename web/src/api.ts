@@ -15,6 +15,8 @@ import type {
   FuturesAcrossScan,
   FuturesBackfillStatus,
   FuturesLocalDetail,
+  FuturesQuote,
+  FuturesVarietyContracts,
   FuturesFavorite,
   FuturesFavoriteInput,
   FuturesLocalReport,
@@ -226,6 +228,15 @@ export function fetchFuturesSweepProgress(token: string) {
 // 扫描途中改并发（服务端会立刻 Tune 协程池）
 export function updateFuturesSweepWorkers(token: string, workers: number) {
   return apiSend<FuturesSweepWorkersResult>('/api/futures/sweep/workers', 'POST', { token, workers })
+}
+
+export function fetchFuturesOverview() {
+  return apiGet<FuturesVarietyContracts[]>('/api/futures/overview')
+}
+
+export function fetchFuturesQuotes(symbols: string[]) {
+  const q = encodeURIComponent(symbols.slice(0, 5).join(','))
+  return apiGet<FuturesQuote[]>(`/api/futures/quotes?symbols=${q}`)
 }
 
 export function fetchFuturesContracts(prefix: string) {

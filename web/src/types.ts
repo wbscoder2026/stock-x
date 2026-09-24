@@ -181,6 +181,33 @@ export type FuturesLocalReport = {
   memory: FuturesMemoryView
 }
 
+export type FuturesVarietyContracts = {
+  prefix: string
+  name: string
+  exchange: string
+  main_symbol: string // 主连代码（RB0）
+  contracts: FuturesContract[] // 主连 + 各月份合约
+  error?: string // 这个品种取合约失败（页面仍显示主连）
+}
+
+export type FuturesQuote = {
+  symbol: string
+  name: string
+  price: number
+  hold: number // 持仓量
+  volume: number
+  bid?: number // 买一价
+  ask?: number // 卖一价
+  bid_vol?: number // 买一量
+  ask_vol?: number // 卖一量
+  source?: string // hq（实时口，有盘口）| kline（退回分钟线，无盘口）
+  time: string
+  prev_close: number
+  change_pct: number
+  stale?: boolean // true = 这次没取到，用的是上一次的价
+  error?: string
+}
+
 export type FuturesContract = {
   symbol: string
   name: string

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/wbscoder2026/stock-x/internal/backtest"
@@ -24,14 +25,19 @@ import (
 const Version = "0.1.0"
 
 type Server struct {
-	Store    *store.Store
-	Jobs     *job.Manager
-	Sched    *job.Scheduler
-	Cfg      config.Config
-	Watch    *futures.Watcher
-	Bars     *futuresync.StoredSource // 回测/研究用：本地优先，缺数据走网络并回写
-	Backfill *futuresync.Backfiller   // 后台慢慢补 1 分钟历史
-	cronFn   func()
+	Store   *store.Store
+	Jobs    *job.Manager
+	Sched   *job.Scheduler
+	Cfg     config.Config
+	Watch   *futures.Watcher
+	Quotes  *futures.QuoteService    // 浮窗实时报价（懒初始化）
+	Catalog *futures.ContractCatalog // 全市场合约清单（总览页）
+
+	quotesOnce  sync.Once
+	catalogOnce sync.Once
+	Bars        *futuresync.StoredSource // 回测/研究用：本地优先，缺数据走网络并回写
+	Backfill    *futuresync.Backfiller   // 后台慢慢补 1 分钟历史
+	cronFn      func()
 }
 
 func New(st *store.Store, jobs *job.Manager, sched *job.Scheduler, cfg config.Config, cronFn func()) *Server {
@@ -316,6 +322,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/futures/local/pause", s.futuresLocalPause)
 	mux.HandleFunc("POST /api/futures/local/resume", s.futuresLocalResume)
 	mux.HandleFunc("GET /api/futures/contracts", s.futuresContracts)
+	mux.HandleFunc("GET /api/futures/quotes", s.futuresQuotes)
+	mux.HandleFunc("GET /api/futures/quotes/raw", s.futuresQuotesRaw)
+	mux.HandleFunc("GET /api/futures/overview", s.futuresOverview)
 	mux.HandleFunc("GET /api/futures/scan", s.futuresScan)
 	mux.HandleFunc("POST /api/futures/backtest", s.futuresBacktest)
 	mux.HandleFunc("POST /api/futures/sweep", s.futuresSweep)
