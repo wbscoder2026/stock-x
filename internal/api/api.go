@@ -49,9 +49,15 @@ func New(st *store.Store, jobs *job.Manager, sched *job.Scheduler, cfg config.Co
 		Bars:  futuresync.NewStoredSource(st, futures.NewMultiSource(futures.DefaultSources()...)),
 	}
 	if cfg.FuturesNews {
-		names := splitCSV(cfg.FuturesNewsSources)
-		keywords := splitCSV(cfg.FuturesNewsKeywords)
-		srv.News = futures.NewNewsHub(futures.NewsSourcesByName(names, cfg.FuturesNewsColumn, keywords)...)
+		srv.News = futures.NewNewsHub(futures.NewsSourcesByName(
+			splitCSV(cfg.FuturesNewsSources),
+			futures.NewsSourceOptions{
+				EMColumn: cfg.FuturesNewsColumn,
+				// 没配检索词就覆盖全部商品品种（由品种表生成）
+				Keywords: splitCSV(cfg.FuturesNewsKeywords),
+				Batch:    cfg.FuturesNewsBatch,
+			},
+		)...)
 	}
 	srv.Backfill = futuresync.NewBackfiller(st, srv.Bars.Cache, srv.Bars.Live)
 	srv.Watch.OnEvents = srv.pushFuturesAlerts // 系统级提醒：飞书 / 本机通知

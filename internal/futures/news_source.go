@@ -476,16 +476,25 @@ func firstNonEmpty(vals ...string) string {
 	return ""
 }
 
+// NewsSourceOptions 建新闻源时的参数（不同源各取所需）。
+type NewsSourceOptions struct {
+	EMColumn string   // 东财快讯的 fastColumn
+	Keywords []string // 「按关键词检索」那个源用的词；为空则退回全品种默认词
+	Batch    int      // 每次刷新取多少个关键词（轮换）
+}
+
 // NewsSourcesByName 按名字建新闻源（给 config.FuturesNewsSources 用）。
 // 认不出的名字直接跳过，这样填错了也只是少一个源，不会整个起不来。
-//
-// emColumn 是东财快讯的 fastColumn；keywords 只给「按关键词检索」的源用。
-func NewsSourcesByName(names []string, emColumn string, keywords []string) []NewsSource {
+func NewsSourcesByName(names []string, opts NewsSourceOptions) []NewsSource {
 	out := make([]NewsSource, 0, len(names))
+	keywords := opts.Keywords
+	if len(keywords) == 0 {
+		keywords = DefaultNewsKeywords()
+	}
 	for _, raw := range names {
 		switch strings.ToLower(strings.TrimSpace(raw)) {
 		case "eastmoney", "em":
-			out = append(out, NewEastmoneyFlashSource(emColumn))
+			out = append(out, NewEastmoneyFlashSource(opts.EMColumn))
 		case "emnews", "em-news":
 			// 长资讯用的是另一套栏目号（默认 347），跟快讯的 fastColumn 不是一回事
 			out = append(out, NewEastmoneyNewsSource(""))
@@ -494,7 +503,11 @@ func NewsSourcesByName(names []string, emColumn string, keywords []string) []New
 		case "100ppi", "ppi":
 			out = append(out, NewPPPISource())
 		case "emsearch", "search":
-			out = append(out, NewEastmoneySearchSource(keywords))
+			src := NewEastmoneySearchSource(keywords)
+			if opts.Batch > 0 {
+				src.Batch = opts.Batch
+			}
+			out = append(out, src)
 		}
 	}
 	return out

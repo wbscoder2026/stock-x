@@ -289,7 +289,9 @@ func MatchVarieties(text string) []string {
 		if seen[v.Prefix] {
 			continue
 		}
-		if strings.Contains(text, v.Name) || prefixes[v.Prefix] {
+		// 新闻里常写「聚乙烯」而不是品种名「塑料」，别名也要认
+		hit := strings.Contains(text, v.Name) || strings.Contains(text, newsKeywordOf(v)) || prefixes[v.Prefix]
+		if hit {
 			seen[v.Prefix] = true
 			out = append(out, v.Name)
 		}

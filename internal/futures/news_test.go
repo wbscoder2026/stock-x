@@ -672,28 +672,129 @@ func TestIsFuturesRelatedPicksIndustryNews(t *testing.T) {
 	}
 }
 
+// 默认检索词要覆盖全部商品品种，且用新闻里真正会出现的叫法
+func TestDefaultNewsKeywords(t *testing.T) {
+	got := DefaultNewsKeywords()
+	if len(got) < 50 {
+		t.Fatalf("应该覆盖全部商品品种：只给了 %d 个", len(got))
+	}
+	set := map[string]bool{}
+	for _, kw := range got {
+		if set[kw] {
+			t.Fatalf("检索词重复：%s", kw)
+		}
+		set[kw] = true
+	}
+	// 用别名而不是「照原名搜等于没搜」的那个名字
+	if !set["国产大豆"] || set["豆一"] {
+		t.Fatalf("豆一该用「国产大豆」去搜：%v", got)
+	}
+	if !set["聚丙烯"] || set["PP"] {
+		t.Fatalf("PP 该用「聚丙烯」去搜：%v", got)
+	}
+	// 中金所的股指/国债不列：搜出来全是 A 股大盘新闻
+	for _, kw := range []string{"沪深300", "上证50", "中证500", "中证1000", "十年国债"} {
+		if set[kw] {
+			t.Fatalf("股指国债不该进默认检索词：%s", kw)
+		}
+	}
+	// 商品品种一个都不能少
+	for _, v := range varieties {
+		if v.Exchange == "中金所" {
+			continue
+		}
+		if !set[newsKeywordOf(v)] {
+			t.Fatalf("缺了品种 %s（%s）", v.Name, newsKeywordOf(v))
+		}
+	}
+}
+
+// 几十个检索词不能一次全搜：每轮取一批，轮着来，几轮之后要能覆盖到全部
+func TestEMSearchRotatesThroughAllKeywords(t *testing.T) {
+	words := []string{"焦煤", "螺纹钢", "铜", "原油", "黄金"}
+	src := &EastmoneySearchSource{Keywords: words, Batch: 2}
+
+	var rounds [][]string
+	for i := 0; i < 3; i++ {
+		rounds = append(rounds, src.pickKeywords(2))
+	}
+	// 每轮两个词，3 轮正好把 5 个词都轮一遍（最后一轮绕回开头）
+	if len(rounds[0]) != 2 || rounds[0][0] != "焦煤" || rounds[0][1] != "螺纹钢" {
+		t.Fatalf("第一轮应取前两个：%v", rounds[0])
+	}
+	if rounds[1][0] != "铜" || rounds[1][1] != "原油" {
+		t.Fatalf("第二轮应接着取：%v", rounds[1])
+	}
+	if rounds[2][0] != "黄金" || rounds[2][1] != "焦煤" {
+		t.Fatalf("到头应绕回开头：%v", rounds[2])
+	}
+
+	// 批量比词表还大时，一轮就要全给（不重复）
+	src2 := &EastmoneySearchSource{Keywords: words, Batch: 99}
+	all := src2.pickKeywords(99)
+	if len(all) != len(words) {
+		t.Fatalf("批量超了就该一轮全给：%v", all)
+	}
+}
+
+// 一轮的结果要截到上限，免得检索源把快讯挤出列表
+func TestEMSearchCapsItemsPerRound(t *testing.T) {
+	const fixture = `cb({"code":0,"result":{"cmsArticleWebOld":[
+{"date":"2026-09-25 09:00:00","code":"1","title":"焦煤主力合约收涨","content":"焦煤","mediaName":"a","url":"u1"},
+{"date":"2026-09-25 08:00:00","code":"2","title":"焦煤库存下降","content":"焦煤","mediaName":"b","url":"u2"},
+{"date":"2026-09-25 07:00:00","code":"3","title":"焦煤现货报价上调","content":"焦煤","mediaName":"c","url":"u3"}
+]}})`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(fixture))
+	}))
+	t.Cleanup(srv.Close)
+	src := &EastmoneySearchSource{URL: srv.URL, Keywords: []string{"焦煤"}, Batch: 1, PerPage: 10, MaxItems: 2}
+	items, err := src.Fetch(context.Background(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("应截到 MaxItems=2：%d", len(items))
+	}
+	// 留下的应是最新的两条
+	if items[0].ID != "1" || items[1].ID != "2" {
+		t.Fatalf("应留最新的：%v %v", items[0].ID, items[1].ID)
+	}
+}
+
 func TestNewsSourcesByName(t *testing.T) {
-	got := NewsSourcesByName([]string{"eastmoney", "sina", "unknown"}, "102", nil)
+	got := NewsSourcesByName([]string{"eastmoney", "sina", "unknown"}, NewsSourceOptions{EMColumn: "102"})
 	if len(got) != 2 {
 		t.Fatalf("认不出的名字应跳过：%d", len(got))
 	}
-	if len(NewsSourcesByName(nil, "", nil)) != 0 {
+	if len(NewsSourcesByName(nil, NewsSourceOptions{})) != 0 {
 		t.Fatal("空列表应返回空")
 	}
 	// 快讯栏目号要传下去
-	if src := NewsSourcesByName([]string{"eastmoney"}, "999", nil)[0].(*EastmoneyFlashSource); src.Column != "999" {
+	em := NewsSourcesByName([]string{"eastmoney"}, NewsSourceOptions{EMColumn: "999"})
+	if src := em[0].(*EastmoneyFlashSource); src.Column != "999" {
 		t.Fatalf("栏目号没传下去：%s", src.Column)
 	}
-	if src := NewsSourcesByName([]string{"emnews"}, "999", nil)[0].(*EastmoneyNewsSource); src.Column != "347" {
+	if src := NewsSourcesByName([]string{"emnews"}, NewsSourceOptions{EMColumn: "999"})[0].(*EastmoneyNewsSource); src.Column != "347" {
 		t.Fatalf("长资讯用的是另一套栏目号：%s", src.Column)
 	}
 	// 新增的行业/检索源
-	if src := NewsSourcesByName([]string{"100ppi"}, "", nil)[0]; src.Name() != "100ppi" || src.FuturesScoped() {
+	if src := NewsSourcesByName([]string{"100ppi"}, NewsSourceOptions{})[0]; src.Name() != "100ppi" || src.FuturesScoped() {
 		t.Fatalf("生意社源不对：%s scoped=%v", src.Name(), src.FuturesScoped())
 	}
-	search := NewsSourcesByName([]string{"emsearch"}, "", []string{"焦煤", "煤矿"})[0].(*EastmoneySearchSource)
+	search := NewsSourcesByName([]string{"emsearch"}, NewsSourceOptions{
+		Keywords: []string{"焦煤", "煤矿"}, Batch: 1,
+	})[0].(*EastmoneySearchSource)
 	if len(search.Keywords) != 2 || search.Keywords[0] != "焦煤" {
-		t.Fatalf("关键词没传下去：%v", search.Keywords)
+		t.Fatalf("检索词没传下去：%v", search.Keywords)
+	}
+	if search.Batch != 1 {
+		t.Fatalf("每轮取词数没传下去：%d", search.Batch)
+	}
+	// 没配检索词时退回全品种默认词
+	auto := NewsSourcesByName([]string{"emsearch"}, NewsSourceOptions{})[0].(*EastmoneySearchSource)
+	if len(auto.Keywords) != len(DefaultNewsKeywords()) {
+		t.Fatalf("没配就该用全品种默认词：%d vs %d", len(auto.Keywords), len(DefaultNewsKeywords()))
 	}
 	if !search.FuturesScoped() {
 		t.Fatal("关键词检索的结果不该再按通用规则过滤")

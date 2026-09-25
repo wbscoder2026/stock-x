@@ -25,7 +25,8 @@ type Config struct {
 	FuturesNews         bool          // 后台定时抓期货新闻。0 = 关闭
 	FuturesNewsEvery    time.Duration // 抓取间隔
 	FuturesNewsSources  string        // 新闻源，逗号分隔（eastmoney/sina/emnews/100ppi/emsearch）
-	FuturesNewsKeywords string        // 关键词检索类源用的词，逗号分隔（焦煤、煤矿…）
+	FuturesNewsKeywords string        // 检索词，逗号分隔；留空 = 覆盖全部商品品种
+	FuturesNewsBatch    int           // 每轮取多少个检索词（轮换，避免一次打几十个请求）
 	FuturesNewsLimit    int           // 列表最多返回多少条
 	FuturesNewsColumn   string        // 东财快讯栏目号 fastColumn（默认 102 = 国际财经，含商品）
 }
@@ -40,21 +41,23 @@ func Load() Config {
 		}
 	}
 	return Config{
-		HTTPAddr:            getenv("HTTP_ADDR", ":8080"),
-		DBPath:              getenv("DB_PATH", "data/stock-x.db"),
-		StartDate:           getenv("START_DATE", "2024-01-01"),
-		FeishuWebhook:       strings.TrimSpace(os.Getenv("FEISHU_WEBHOOK_URL")),
-		CronSpec:            getenv("CRON_SPEC", "15 19 * * 1-5"),
-		Workers:             workers,
-		FuturesSync:         getenvBool("FUTURES_SYNC", true),
-		FuturesSyncEvery:    getenvDuration("FUTURES_SYNC_EVERY", 30*time.Minute),
-		FuturesSyncPeriods:  getenv("FUTURES_SYNC_PERIODS", "1d,5,15,30,60,120"),
-		FuturesSyncWorkers:  getenvInt("FUTURES_SYNC_WORKERS", 4),
-		FuturesSyncDerive:   getenvBool("FUTURES_SYNC_DERIVE", true),
-		FuturesNews:         getenvBool("FUTURES_NEWS", true),
-		FuturesNewsEvery:    getenvDuration("FUTURES_NEWS_EVERY", 5*time.Minute),
-		FuturesNewsSources:  getenv("FUTURES_NEWS_SOURCES", "eastmoney,sina,100ppi,emsearch"),
-		FuturesNewsKeywords: getenv("FUTURES_NEWS_KEYWORDS", "焦煤,焦炭,煤炭,铁矿石,螺纹钢,原油"),
+		HTTPAddr:           getenv("HTTP_ADDR", ":8080"),
+		DBPath:             getenv("DB_PATH", "data/stock-x.db"),
+		StartDate:          getenv("START_DATE", "2024-01-01"),
+		FeishuWebhook:      strings.TrimSpace(os.Getenv("FEISHU_WEBHOOK_URL")),
+		CronSpec:           getenv("CRON_SPEC", "15 19 * * 1-5"),
+		Workers:            workers,
+		FuturesSync:        getenvBool("FUTURES_SYNC", true),
+		FuturesSyncEvery:   getenvDuration("FUTURES_SYNC_EVERY", 30*time.Minute),
+		FuturesSyncPeriods: getenv("FUTURES_SYNC_PERIODS", "1d,5,15,30,60,120"),
+		FuturesSyncWorkers: getenvInt("FUTURES_SYNC_WORKERS", 4),
+		FuturesSyncDerive:  getenvBool("FUTURES_SYNC_DERIVE", true),
+		FuturesNews:        getenvBool("FUTURES_NEWS", true),
+		FuturesNewsEvery:   getenvDuration("FUTURES_NEWS_EVERY", 5*time.Minute),
+		FuturesNewsSources: getenv("FUTURES_NEWS_SOURCES", "eastmoney,sina,100ppi,emsearch"),
+		// 留空 = 覆盖全部商品品种（由 futures.DefaultNewsKeywords 生成）
+		FuturesNewsKeywords: getenv("FUTURES_NEWS_KEYWORDS", ""),
+		FuturesNewsBatch:    getenvInt("FUTURES_NEWS_KEYWORD_BATCH", 12),
 		FuturesNewsLimit:    getenvInt("FUTURES_NEWS_LIMIT", 200),
 		FuturesNewsColumn:   getenv("FUTURES_NEWS_EM_COLUMN", "102"),
 	}

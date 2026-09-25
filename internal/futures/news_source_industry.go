@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
+	"sync"
 )
 
 // 行业 / 企业新闻源。
@@ -191,28 +193,88 @@ func parsePPPIIndustry(body []byte) []NewsItem {
 	return out
 }
 
+// ---------------------------------------------------------------- 检索词
+
+// newsKeywordAliases 品种名 → 新闻里的叫法。
+// 有些品种名在新闻里基本不这么写（「豆一」「PP」），照原名搜等于没搜。
+var newsKeywordAliases = map[string]string{
+	"豆一": "国产大豆",
+	"豆二": "进口大豆",
+	"淀粉": "玉米淀粉",
+	"热卷": "热轧卷板",
+	"塑料": "聚乙烯",
+	"PP": "聚丙烯",
+}
+
+// newsKeywordOf 某品种在新闻里该用什么词搜（没有别名就用品种名）。
+func newsKeywordOf(v Variety) string {
+	if alias, ok := newsKeywordAliases[v.Name]; ok {
+		return alias
+	}
+	return v.Name
+}
+
+// DefaultNewsKeywords 默认检索词：每个商品品种一个，覆盖全部品种的现货/库存/产业新闻。
+//
+// 中金所的股指、国债期货不列——它们没有供需和库存，搜「沪深300」回来的全是 A 股大盘新闻，
+// 会把商品新闻淹掉。要的话在 FUTURES_NEWS_KEYWORDS 里自己加上。
+func DefaultNewsKeywords() []string {
+	out := make([]string, 0, len(varieties))
+	for _, v := range varieties {
+		if v.Exchange == "中金所" {
+			continue
+		}
+		out = append(out, newsKeywordOf(v))
+	}
+	return out
+}
+
 // ---------------------------------------------------------------- 东财关键词检索
 
 const defaultEMSearchURL = "https://search-api-web.eastmoney.com/search/jsonp"
 
-// EastmoneySearchSource 按关键词捞行业 / 企业新闻。
+// EastmoneySearchSource 按关键词捞各品种的行业 / 企业 / 现货新闻。
 //
-// 关键词由配置给（默认就是煤焦钢矿那几个），所以抓回来不再二次过滤——
-// 你填「焦煤」要的就是焦煤，填「煤矿」要的就是煤矿，别再拿通用规则把它筛掉。
+// 关键词是一整个品种表（几十个），一次全搜会打几十个请求，所以**每次刷新轮换取一批**，
+// 几轮下来所有品种都覆盖到。关键词是明确指定的，所以抓回来不再二次过滤——
+// 你要「焦煤」就给你焦煤，别再拿通用规则把它筛掉。
 type EastmoneySearchSource struct {
 	HTTP     *http.Client
 	URL      string
 	Keywords []string
-	PerPage  int
+	Batch    int // 每次刷新取多少个关键词（轮换）
+	PerPage  int // 每个关键词取多少条
+	MaxItems int // 一轮最多贡献多少条，免得把快讯源挤没了
+
+	mu   sync.Mutex
+	next int // 轮换游标
 }
 
 func NewEastmoneySearchSource(keywords []string) *EastmoneySearchSource {
-	return &EastmoneySearchSource{URL: defaultEMSearchURL, Keywords: keywords, PerPage: 20}
+	return &EastmoneySearchSource{
+		URL: defaultEMSearchURL, Keywords: keywords,
+		Batch: 12, PerPage: 20, MaxItems: 60,
+	}
 }
 
 func (e *EastmoneySearchSource) Name() string { return "emsearch" }
 
 func (e *EastmoneySearchSource) FuturesScoped() bool { return true }
+
+// pickKeywords 从游标处取 batch 个词（到头就绕回去），并把游标推下去。
+func (e *EastmoneySearchSource) pickKeywords(batch int) []string {
+	if batch <= 0 || batch > len(e.Keywords) {
+		batch = len(e.Keywords)
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]string, 0, batch)
+	for i := 0; i < batch; i++ {
+		out = append(out, e.Keywords[(e.next+i)%len(e.Keywords)])
+	}
+	e.next = (e.next + batch) % len(e.Keywords)
+	return out
+}
 
 func (e *EastmoneySearchSource) Fetch(ctx context.Context, limit int) ([]NewsItem, error) {
 	if len(e.Keywords) == 0 {
@@ -223,23 +285,41 @@ func (e *EastmoneySearchSource) Fetch(ctx context.Context, limit int) ([]NewsIte
 		per = limit
 	}
 	if per <= 0 {
-		per = 30
+		per = 20
 	}
-	out := make([]NewsItem, 0, per*len(e.Keywords))
+	batch := e.Batch
+	if len(e.Keywords) < batch || batch <= 0 {
+		batch = len(e.Keywords)
+	}
+	words := e.pickKeywords(batch)
+
+	out := make([]NewsItem, 0, per*len(words))
+	seen := map[string]bool{}
 	var lastErr error
-	for _, kw := range e.Keywords {
+	for _, kw := range words {
 		items, err := e.search(ctx, kw, per)
 		if err != nil {
 			lastErr = err
 			continue // 某个词挂了不影响其他的
 		}
-		out = append(out, items...)
+		for _, it := range items {
+			if seen[it.ID] {
+				continue
+			}
+			seen[it.ID] = true
+			out = append(out, it)
+		}
 	}
 	if len(out) == 0 {
 		if lastErr != nil {
 			return nil, lastErr
 		}
 		return nil, fmt.Errorf("没有检索结果")
+	}
+	// 截到本轮上限：留下最新的那些，别把快讯源挤出列表
+	sort.SliceStable(out, func(i, j int) bool { return out[i].TS > out[j].TS })
+	if e.MaxItems > 0 && len(out) > e.MaxItems {
+		out = out[:e.MaxItems]
 	}
 	return out, nil
 }
