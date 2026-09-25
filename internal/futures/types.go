@@ -1,6 +1,9 @@
 package futures
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 const (
 	DirUp   = "向上突破"
@@ -35,7 +38,10 @@ type Event struct {
 	Close      float64
 	Volume     int64
 	LevelPrice float64
-	ATR        float64 // 突破当根的 ATR（推荐止损/止盈用；数据不足时为 0）
+	ATR        float64 // 突破当根的 ATR（atr 止损模式用；数据不足时为 0）
+	// PrevLow / PrevHigh 信号那根「前一根」K 线的最低价 / 最高价（prev_low 止损模式用）。
+	PrevLow  float64
+	PrevHigh float64
 }
 
 // DefaultRR 默认盈亏比：止盈距离 = 止损距离 × RR。
@@ -44,6 +50,44 @@ const DefaultRR = 1.5
 // DefaultStopATR 默认止损距离 = 该倍数 × ATR（1 = 一倍 ATR）。
 // 大周期（60 分钟）的 ATR 天然更大，想要更紧的止损可以调小这个倍数。
 const DefaultStopATR = 1.0
+
+// 止损方式
+const (
+	StopModeATR     = "atr"      // 入场 ∓ StopATR×ATR（默认，跟随波动率）
+	StopModePrevLow = "prev_low" // 做多 = 前一根最低 − StopPoints；做空 = 前一根最高 + StopPoints
+)
+
+const (
+	DefaultStopMode   = StopModeATR
+	DefaultStopPoints = 1.0 // prev_low 模式的缓冲点数（1 点 = 1 个价格单位，不是 1 个跳）
+)
+
+// IsValidStopMode 白名单校验（扫描的候选值用它挡非法输入）。
+func IsValidStopMode(mode string) bool {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case StopModeATR, StopModePrevLow:
+		return true
+	}
+	return false
+}
+
+// normalizeStopMode 归一化：大小写 / 空格 / 常见别名都能认；认不出按默认 atr。
+func normalizeStopMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case StopModePrevLow, "prevlow", "prev-low", "prevbar", "prev_bar", "前低":
+		return StopModePrevLow
+	default:
+		return StopModeATR
+	}
+}
+
+// effectiveStopPoints prev_low 模式的缓冲点数：非法/未填 → 默认 1。
+func effectiveStopPoints(points float64) float64 {
+	if !finite(points) || points <= 0 {
+		return DefaultStopPoints
+	}
+	return points
+}
 
 type Params struct {
 	Symbol    string  `json:"symbol"`
@@ -54,7 +98,10 @@ type Params struct {
 	ATRK      float64 `json:"atr_k"`
 	VolRatio  float64 `json:"vol_ratio"`
 	HoldBars  int     `json:"hold_bars"`
-	StopATR   float64 `json:"stop_atr"` // 止损 = 入场 ∓ 该倍数 × ATR
+	StopATR   float64 `json:"stop_atr"` // atr 模式：止损 = 入场 ∓ 该倍数 × ATR
+	// StopMode 止损方式：atr（默认）或 prev_low（前一根 K 线的最低/最高 ∓ 点数）。
+	StopMode   string  `json:"stop_mode"`
+	StopPoints float64 `json:"stop_points"` // prev_low 模式的缓冲点数（默认 1）
 	// NoOvernight 日内策略：当日「日盘」收盘前必须平仓，不持隔夜（夜盘属次日交易时段，也不持有）。
 	NoOvernight bool `json:"no_overnight"`
 	// From / To 回测信号的时间范围（含边界）；空 = 不限。
@@ -69,7 +116,7 @@ func DefaultParams() Params {
 		Symbol: "JM0", Period: "5",
 		ORB: 30, Donchian: 20, ATRPeriod: 14,
 		ATRK: 0.25, VolRatio: 1.5, HoldBars: 6,
-		StopATR: DefaultStopATR, RR: DefaultRR,
+		StopATR: DefaultStopATR, StopMode: DefaultStopMode, StopPoints: DefaultStopPoints, RR: DefaultRR,
 	}
 }
 
@@ -106,6 +153,14 @@ func mergeParams(p Params) Params {
 	}
 	if !finite(p.StopATR) || p.StopATR <= 0 {
 		p.StopATR = d.StopATR
+	}
+	if !IsValidStopMode(p.StopMode) {
+		p.StopMode = d.StopMode
+	} else {
+		p.StopMode = normalizeStopMode(p.StopMode)
+	}
+	if !finite(p.StopPoints) || p.StopPoints <= 0 {
+		p.StopPoints = d.StopPoints
 	}
 	return p
 }
@@ -162,6 +217,8 @@ type Outcome struct {
 	R          float64 `json:"r_multiple"`  // 以「止损距离」风险为 1R 的收益倍数
 	StopATR    float64 `json:"stop_atr"`    // 本次用的止损 ATR 倍数
 	TickSize   float64 `json:"tick_size"`   // 该品种最小变动价位（展示用）
+	StopMode   string  `json:"stop_mode"`   // 本次用的止损方式：atr / prev_low
+	StopPoints float64 `json:"stop_points"` // prev_low 模式的缓冲点数
 }
 
 type KlineBar struct {

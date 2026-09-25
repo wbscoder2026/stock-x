@@ -38,8 +38,12 @@ import {
   TIPS,
   contractOptions,
   exitTag,
+  STOP_MODE_ATR,
+  STOP_MODE_OPTIONS,
+  STOP_MODE_PREV_LOW,
   fmtPrice,
   pct,
+  stopModeLabel,
   varietyOptions,
 } from './FuturesShared'
 
@@ -99,7 +103,7 @@ const SWEEP_PRESETS = {
   volRatio: [1.0, 1.2, 1.5, 2.0],
   holdBars: [3, 4, 6, 8, 12],
   stopATR: [0.5, 0.75, 1.0, 1.5, 2.0],
-  rr: [1.0, 1.5, 2.0, 2.5, 3.0],
+  rr: [0.6, 1.0, 1.5, 2.0, 2.5, 3.0],
 }
 
 function NumTags({
@@ -203,7 +207,8 @@ function SortHeader({
 function sweepRowKey(r: FuturesSweepRow) {
   return (
     `${r.params.period}-${r.params.rr}-${r.params.stop_atr}-${r.params.hold_bars}-${r.params.donchian}-` +
-    `${r.params.orb}-${r.params.atr_period}-${r.params.atr_k}-${r.params.vol_ratio}-${r.params.no_overnight ? 1 : 0}`
+    `${r.params.orb}-${r.params.atr_period}-${r.params.atr_k}-${r.params.vol_ratio}-${r.params.no_overnight ? 1 : 0}-` +
+    `${r.params.stop_mode ?? STOP_MODE_ATR}-${r.params.stop_points ?? 1}`
   )
 }
 
@@ -224,6 +229,14 @@ const sweepCols = (
   },
   { ...{ title: <SortHeader text="盈亏比" sortKey="rr" activeKey={sort.key} asc={sort.asc} onSort={sort.onSort} /> }, dataIndex: ['params', 'rr'], width: 80 },
   { title: <SortHeader text="止损ATR" sortKey="stop_atr" activeKey={sort.key} asc={sort.asc} onSort={sort.onSort} />, dataIndex: ['params', 'stop_atr'], width: 88 },
+  {
+    title: <ParamLabel text="止损方式" hint={TIPS.stop_mode} />,
+    dataIndex: ['params', 'stop_mode'],
+    width: 100,
+    render: (v: string, r) => (
+      <Tag color={v === STOP_MODE_PREV_LOW ? 'purple' : 'blue'}>{stopModeLabel(v, r.params.stop_points)}</Tag>
+    ),
+  },
   {
     title: <ParamLabel text="隔夜" hint={TIPS.overnight} />,
     dataIndex: ['params', 'no_overnight'],
@@ -298,6 +311,8 @@ export default function FuturesBacktestPage() {
   const [volRatio, setVolRatio] = useState(DEFAULT_PARAMS.volRatio)
   const [holdBars, setHoldBars] = useState(DEFAULT_PARAMS.holdBars)
   const [stopATR, setStopATR] = useState(DEFAULT_PARAMS.stopATR)
+  const [stopMode, setStopMode] = useState<string>(STOP_MODE_ATR)
+  const [stopPoints, setStopPoints] = useState(1)
   const [allowOvernight, setAllowOvernight] = useState(true)
   const [rr, setRr] = useState(DEFAULT_PARAMS.rr)
   const [scanning, setScanning] = useState(false)
@@ -317,6 +332,8 @@ export default function FuturesBacktestPage() {
     volRatio: swVol,
     holdBars: swHold,
     stopATR: swStop,
+    stopModes: swStopModes,
+    stopPoints: swStopPoints,
     overnight: swOvernight,
     rr: swRr,
     objective,
@@ -331,6 +348,8 @@ export default function FuturesBacktestPage() {
   const setSwVol = (v: string[]) => setSweepForm({ volRatio: v })
   const setSwHold = (v: string[]) => setSweepForm({ holdBars: v })
   const setSwStop = (v: string[]) => setSweepForm({ stopATR: v })
+  const setSwStopModes = (v: string[]) => setSweepForm({ stopModes: v })
+  const setSwStopPoints = (v: string[]) => setSweepForm({ stopPoints: v })
   const setSwOvernight = (v: string[]) => setSweepForm({ overnight: v })
   const setSwRr = (v: string[]) => setSweepForm({ rr: v })
   const setObjective = (v: FuturesSweepObjective) => setSweepForm({ objective: v })
@@ -341,6 +360,9 @@ export default function FuturesBacktestPage() {
   const msPerCombo = sweepState.msPerCombo
   const { sortKey, sortAsc, onlyReliable } = sweepState
   const [range, setRange] = useState<RangeValue>(null)
+  const [applyFlash, setApplyFlash] = useState(false)
+  const [focusIdx, setFocusIdx] = useState<number | undefined>(undefined)
+  const flashTimerRef = useRef<number | undefined>(undefined)
 
   useEffect(() => {
     void (async () => {
@@ -395,6 +417,8 @@ export default function FuturesBacktestPage() {
     vol_ratio: volRatio,
     hold_bars: holdBars,
     stop_atr: stopATR,
+    stop_mode: stopMode,
+    stop_points: stopPoints,
     no_overnight: !allowOvernight,
     from: range?.[0]?.format('YYYY-MM-DD HH:mm') ?? '',
     to: range?.[1]?.format('YYYY-MM-DD HH:mm') ?? '',
@@ -463,6 +487,11 @@ export default function FuturesBacktestPage() {
     vol_ratio: numAxis(swVol, volRatio),
     hold_bars: numAxis(swHold, holdBars),
     stop_atr: numAxis(swStop, stopATR),
+    stop_modes: swStopModes.length ? swStopModes : [stopMode],
+    // 只有选了「前低」方式，点数才有意义：否则点数轴会跑出一堆完全相同的组合
+    stop_points: (swStopModes.length ? swStopModes : [stopMode]).includes(STOP_MODE_PREV_LOW)
+      ? numAxis(swStopPoints, stopPoints)
+      : [stopPoints],
     no_overnight: swOvernight.length ? swOvernight.map(Number) : [allowOvernight ? 0 : 1],
     rr: numAxis(swRr, rr),
     objective,
@@ -543,6 +572,13 @@ export default function FuturesBacktestPage() {
     }
   }
 
+  useEffect(() => () => window.clearTimeout(flashTimerRef.current), [])
+
+  // 换了回测结果（或改了参数重跑）→ 清掉聚焦，避免下标对不上另一批样本
+  useEffect(() => {
+    setFocusIdx(undefined)
+  }, [result])
+
   const comboCount =
     (sweepBody.periods?.length ?? 1) *
     (sweepBody.orb?.length ?? 1) *
@@ -566,18 +602,50 @@ export default function FuturesBacktestPage() {
     }
   }
 
+  // 套用扫描结果到上面的回测表单。
+  // 注意：级别（period）也是扫描轴，必须一起覆盖 —— 漏掉它就会出现「点了用该组但配置没变」。
   function applySweepRow(row: FuturesSweepRow) {
     const p = row.params
-    if (p.orb) setOrb(p.orb)
-    if (p.donchian) setDonchian(p.donchian)
-    if (p.atr_period) setAtrPeriod(p.atr_period)
-    if (p.atr_k) setAtrK(p.atr_k)
-    if (p.vol_ratio) setVolRatio(p.vol_ratio)
-    if (p.hold_bars) setHoldBars(p.hold_bars)
-    if (p.stop_atr) setStopATR(p.stop_atr)
-    if (p.no_overnight !== undefined) setAllowOvernight(!p.no_overnight)
-    if (p.rr) setRr(p.rr)
-    message.success('已套用到上面的表单，点「回测突破」看逐笔明细')
+    const num = (v: number | undefined, fallback: number) =>
+      typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : fallback
+
+    const nextPeriod = p.period || period
+    const nextOrb = num(p.orb, orb)
+    const nextDonchian = num(p.donchian, donchian)
+    const nextATRPeriod = num(p.atr_period, atrPeriod)
+    const nextATRK = num(p.atr_k, atrK)
+    const nextVol = num(p.vol_ratio, volRatio)
+    const nextStop = num(p.stop_atr, stopATR)
+    const nextStopMode = p.stop_mode || stopMode
+    const nextStopPoints = num(p.stop_points, stopPoints)
+    const nextHold = num(p.hold_bars, holdBars)
+    const nextRR = num(p.rr, rr)
+    const nextOvernight = !(p.no_overnight ?? false)
+
+    setPeriod(nextPeriod)
+    setOrb(nextOrb)
+    setDonchian(nextDonchian)
+    setAtrPeriod(nextATRPeriod)
+    setAtrK(nextATRK)
+    setVolRatio(nextVol)
+    setStopATR(nextStop)
+    setStopMode(nextStopMode)
+    setStopPoints(nextStopPoints)
+    setHoldBars(nextHold)
+    setRr(nextRR)
+    setAllowOvernight(nextOvernight)
+
+    // 让「套用成功」看得见：滚回表单 + 高亮一下，并把套用的值念出来
+    setApplyFlash(true)
+    window.clearTimeout(flashTimerRef.current)
+    flashTimerRef.current = window.setTimeout(() => setApplyFlash(false), 2600)
+    document.querySelector('.page-wrap')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    message.success(
+      `已套用：${nextPeriod}分钟 · ORB ${nextOrb} · Donchian ${nextDonchian} · ` +
+        `止损 ${
+          nextStopMode === STOP_MODE_PREV_LOW ? `前低/前高±${nextStopPoints}点` : `${nextStop}×ATR`
+        } · 盈亏比 ${nextRR} · 持有 ${nextHold} 根${nextOvernight ? '' : ' · 日内'} → 点「回测突破」看逐笔明细`,
+    )
   }
 
   const objectiveLabel = OBJECTIVES.find((o) => o.value === objective)?.label ?? objective
@@ -592,7 +660,14 @@ export default function FuturesBacktestPage() {
       <Typography.Title level={4} style={{ marginBottom: 16 }}>
         期货回测
       </Typography.Title>
-      <Card size="small" style={{ marginBottom: 16 }}>
+      <Card
+        size="small"
+        style={{
+          marginBottom: 16,
+          boxShadow: applyFlash ? '0 0 0 3px #ffa940' : undefined,
+          transition: 'box-shadow .25s',
+        }}
+      >
         <Form layout="inline">
           <Form.Item label="品种">
             <Select
@@ -663,9 +738,24 @@ export default function FuturesBacktestPage() {
           <Form.Item label={<ParamLabel text="允许隔夜" hint={TIPS.overnight} />}>
             <Switch checked={allowOvernight} onChange={setAllowOvernight} checkedChildren="允许" unCheckedChildren="日内" />
           </Form.Item>
-          <Form.Item label={<ParamLabel text="止损ATR" hint={TIPS.stop_atr} />}>
-            <InputNumber min={0.1} max={5} step={0.25} value={stopATR} onChange={(v) => setStopATR(Number(v ?? 1))} />
+          <Form.Item label={<ParamLabel text="止损方式" hint={TIPS.stop_mode} />}>
+            <Select style={{ width: 172 }} value={stopMode} onChange={setStopMode} options={STOP_MODE_OPTIONS} />
           </Form.Item>
+          {stopMode === STOP_MODE_PREV_LOW ? (
+            <Form.Item label={<ParamLabel text="止损点数" hint={TIPS.stop_points} />}>
+              <InputNumber
+                min={0.5}
+                max={20}
+                step={0.5}
+                value={stopPoints}
+                onChange={(v) => setStopPoints(Number(v ?? 1))}
+              />
+            </Form.Item>
+          ) : (
+            <Form.Item label={<ParamLabel text="止损ATR" hint={TIPS.stop_atr} />}>
+              <InputNumber min={0.1} max={5} step={0.25} value={stopATR} onChange={(v) => setStopATR(Number(v ?? 1))} />
+            </Form.Item>
+          )}
           <Form.Item label={<ParamLabel text="盈亏比" hint={TIPS.rr} />}>
             <InputNumber min={0.1} step={0.1} value={rr} onChange={(v) => setRr(Number(v ?? 1.5))} />
           </Form.Item>
@@ -746,6 +836,31 @@ export default function FuturesBacktestPage() {
             />
           </span>
           <span>
+            <ParamLabel text="止损方式" hint={TIPS.stop_mode} />{' '}
+            <Select
+              mode="multiple"
+              allowClear
+              style={{ minWidth: 226 }}
+              placeholder="留空 = 只用当前方式"
+              value={swStopModes}
+              onChange={setSwStopModes}
+              options={STOP_MODE_OPTIONS}
+            />
+            <Tooltip title="两种都选上 → 同一段行情一次跑出两套止损，直接对照">
+              <Button
+                size="small"
+                style={{ marginLeft: 6 }}
+                onClick={() => setSwStopModes([STOP_MODE_ATR, STOP_MODE_PREV_LOW])}
+              >
+                两种都跑
+              </Button>
+            </Tooltip>
+          </span>
+          <span>
+            <ParamLabel text="止损点数" hint={TIPS.stop_points} />{' '}
+            <NumTags value={swStopPoints} onChange={setSwStopPoints} presets={[1, 2, 3]} />
+          </span>
+          <span>
             <ParamLabel text="止损ATR" hint={TIPS.stop_atr} />{' '}
             <NumTags value={swStop} onChange={setSwStop} presets={SWEEP_PRESETS.stopATR} width={150} />
           </span>
@@ -807,7 +922,11 @@ export default function FuturesBacktestPage() {
               showIcon
               message={
                 sweep.best
-                  ? `最佳组合（按${objectiveLabel}）：${sweep.best.params.period}分钟 · 止损 ${sweep.best.params.stop_atr}×ATR · 盈亏比 ${sweep.best.params.rr} · 持有 ${sweep.best.params.hold_bars} · Donchian ${sweep.best.params.donchian} · ORB ${sweep.best.params.orb} · ATR周期 ${sweep.best.params.atr_period} · ATR缓冲 ${sweep.best.params.atr_k} · 量能 ${sweep.best.params.vol_ratio}`
+                  ? `最佳组合（按${objectiveLabel}）：${sweep.best.params.period}分钟 · 止损 ${
+                      sweep.best.params.stop_mode === STOP_MODE_PREV_LOW
+                        ? `前低/前高±${sweep.best.params.stop_points ?? 1}点`
+                        : `${sweep.best.params.stop_atr}×ATR`
+                    } · 盈亏比 ${sweep.best.params.rr} · 持有 ${sweep.best.params.hold_bars} · Donchian ${sweep.best.params.donchian} · ORB ${sweep.best.params.orb} · ATR周期 ${sweep.best.params.atr_period} · ATR缓冲 ${sweep.best.params.atr_k} · 量能 ${sweep.best.params.vol_ratio}`
                   : '没有可用组合'
               }
               description={
@@ -920,6 +1039,9 @@ export default function FuturesBacktestPage() {
             />
           </Space>
           <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>
+            图上图层可开关（买点/卖点、出场 R 倍数、均线、成交量）；<b>点明细某一行或点图上买点附近</b> →
+            聚焦这一笔，画出它的入场价 / 止损价 / 止盈价三条横线，再点一次取消。
+            <br />
             回测规则：入场 = 信号那根收盘价 · 止损 = {stopATR}×ATR · 止盈 = 止损距离×{rr} · 最多持有 {holdBars} 根；
             同根既破止损又触止盈按止损算、跳空按开盘价成交；收益已按突破方向折算，未计手续费与滑点。
             {result.skipped_eod ? ` 因「禁止隔夜」跳过 ${result.skipped_eod} 个收盘后/夜盘的信号（不计入统计）。` : ''}
@@ -927,7 +1049,13 @@ export default function FuturesBacktestPage() {
               ? ` 时间范围 ${result.from || '不限'} ~ ${result.to || '不限'}（按信号时间筛选，出场可延续到范围之后）。`
               : ' 时间范围：不限。'}
           </Typography.Paragraph>
-          <FuturesChart bars={result.bars ?? []} events={result.items ?? []} />
+          <FuturesChart
+            bars={result.bars ?? []}
+            events={result.items ?? []}
+            mode="trade"
+            focusIndex={focusIdx}
+            onFocus={(i) => setFocusIdx((cur) => (cur === i ? undefined : i))}
+          />
           <Table
             size="small"
             rowKey={(_, i) => String(i)}
@@ -936,6 +1064,11 @@ export default function FuturesBacktestPage() {
             pagination={{ pageSize: 50 }}
             scroll={{ x: 1300 }}
             locale={{ emptyText: '无样本（分钟线仅覆盖近期）' }}
+            rowClassName={(_, i) => (i === focusIdx ? 'row-active' : '')}
+            onRow={(_, i) => ({
+              onClick: () => setFocusIdx((cur) => (cur === i ? undefined : i)),
+              style: { cursor: 'pointer' },
+            })}
           />
         </>
       ) : null}

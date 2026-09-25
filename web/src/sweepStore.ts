@@ -18,6 +18,8 @@ export type SweepForm = {
   volRatio: string[]
   holdBars: string[]
   stopATR: string[]
+  stopModes: string[]
+  stopPoints: string[]
   overnight: string[]
   rr: string[]
   objective: FuturesSweepObjective
@@ -26,17 +28,23 @@ export type SweepForm = {
 }
 
 // 默认并发 64（后端上限也是 64；填 0 = 自动用满本机核数）
+//
+// 默认勾选：每根轴都给上值（不留空让页面去猜），关键轴给多档；级别 / ORB 只取 15 分钟。
+// 这一套 = 1080 个组合（约 30 秒）。注意「全部预置都勾选」是 150 万组合，远超服务端 1 万上限，
+// 想扩大范围就点各轴旁边的预置标签（止损方式有「两种都跑」一键）。
 export const DEFAULT_SWEEP_FORM: SweepForm = {
-  periods: [],
-  orb: [],
+  periods: ['15'],
+  orb: ['15'],
   donchian: ['10', '20', '30'],
-  atrPeriod: [],
-  atrK: [],
-  volRatio: [],
+  atrPeriod: ['14'],
+  atrK: ['0.25'],
+  volRatio: ['1.5'],
   holdBars: ['4', '6', '8'],
   stopATR: ['0.5', '1', '1.5'],
-  overnight: [],
-  rr: ['1', '1.5', '2', '3'],
+  stopModes: ['atr', 'prev_low'], // 两种止损方式默认都跑 → 直接对照
+  stopPoints: ['1', '2'],
+  overnight: ['0', '1'], // 允许隔夜 + 日内 都跑
+  rr: ['0.6', '1', '1.5', '2', '3'],
   objective: 'avg_return',
   minTrades: 30,
   workers: 64,

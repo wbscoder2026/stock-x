@@ -14,6 +14,9 @@ import type {
   FuturesSweepWorkersResult,
   FuturesAcrossScan,
   FuturesBackfillStatus,
+  FuturesLocalDetail,
+  FuturesQuote,
+  FuturesVarietyContracts,
   FuturesFavorite,
   FuturesFavoriteInput,
   FuturesLocalReport,
@@ -170,26 +173,17 @@ export function fetchFuturesVarieties() {
   return apiGet<FuturesVariety[]>('/api/futures/varieties')
 }
 
+export function fetchFuturesLocalDetail(prefix: string, symbol?: string) {
+  const q = symbol ? `&symbol=${encodeURIComponent(symbol)}` : ''
+  return apiGet<FuturesLocalDetail>(`/api/futures/local/detail?prefix=${encodeURIComponent(prefix)}${q}`)
+}
+
 export function fetchFuturesLocal() {
   return apiGet<FuturesLocalReport>('/api/futures/local')
 }
 
-// 补全：给 symbols/symbol 就按合约代码补（主连 JM0、月份 JM2701 都行）；
-// 只给 prefix 则按 kinds 补（默认主连 + 主力月份合约一起补）
-export function postFuturesLocalBackfill(body: {
-  prefix?: string
-  symbol?: string
-  symbols?: string[]
-  kinds?: string[]
-  from?: string
-  to?: string
-}) {
+export function postFuturesLocalBackfill(body: { prefix: string; symbol?: string; from?: string; to?: string }) {
   return apiSend<FuturesBackfillStatus>('/api/futures/local/backfill', 'POST', body)
-}
-
-// 进度条专用：只回状态，不查覆盖表，可以高频轮询
-export function fetchFuturesLocalProgress() {
-  return apiGet<FuturesBackfillStatus>('/api/futures/local/progress')
 }
 
 export function pauseFuturesLocal() {
@@ -243,6 +237,15 @@ export function fetchFuturesSweepProgress(token: string) {
 // 扫描途中改并发（服务端会立刻 Tune 协程池）
 export function updateFuturesSweepWorkers(token: string, workers: number) {
   return apiSend<FuturesSweepWorkersResult>('/api/futures/sweep/workers', 'POST', { token, workers })
+}
+
+export function fetchFuturesOverview() {
+  return apiGet<FuturesVarietyContracts[]>('/api/futures/overview')
+}
+
+export function fetchFuturesQuotes(symbols: string[]) {
+  const q = encodeURIComponent(symbols.slice(0, 5).join(','))
+  return apiGet<FuturesQuote[]>(`/api/futures/quotes?symbols=${q}`)
 }
 
 export function fetchFuturesContracts(prefix: string) {

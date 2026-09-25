@@ -208,7 +208,7 @@ func favoriteFromBody(body favoriteBody) (store.FuturesFavorite, error) {
 	}
 	return store.FuturesFavorite{
 		Name: name, Note: note, ParamsJSON: string(raw),
-		OriginSymbol: strings.TrimSpace(body.OriginSymbol),
+		OriginSymbol:  strings.TrimSpace(body.OriginSymbol),
 		OriginWinRate: body.OriginWinRate, OriginAvgReturn: body.OriginAvgReturn,
 		OriginAvgR: body.OriginAvgR, OriginProfitFactor: body.OriginProfitFactor,
 		OriginTrades: body.OriginTrades,

@@ -9,18 +9,18 @@ import (
 
 // FuturesFavorite 一条收藏的期货扫描配置（一组固定参数，不是整张扫描网格）。
 type FuturesFavorite struct {
-	ID                   int64
-	Name                 string
-	Note                 string
-	ParamsJSON           string
-	OriginSymbol         string
-	OriginWinRate        float64
-	OriginAvgReturn      float64
-	OriginAvgR           float64
-	OriginProfitFactor   float64
-	OriginTrades         int
-	CreatedAt            string
-	UpdatedAt            string
+	ID                 int64
+	Name               string
+	Note               string
+	ParamsJSON         string
+	OriginSymbol       string
+	OriginWinRate      float64
+	OriginAvgReturn    float64
+	OriginAvgR         float64
+	OriginProfitFactor float64
+	OriginTrades       int
+	CreatedAt          string
+	UpdatedAt          string
 }
 
 const futuresFavoriteDDL = `

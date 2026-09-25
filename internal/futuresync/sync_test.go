@@ -291,6 +291,7 @@ func TestStoredSourcePrefersLocal(t *testing.T) {
 	}
 	live := &baseSource{name: "live", minute: []futures.Bar{minuteBar(21, 55, 999)}}
 	src := NewStoredSource(st, live)
+	src.Cache.SetFreeMemory(func() uint64 { return 32 << 30 })
 
 	bars, err := src.Minute(context.Background(), mustVariety(t, "JM"), "5")
 	if err != nil || len(bars) != 1 {
@@ -315,6 +316,7 @@ func TestStoredSourceFallsBackAndWarms(t *testing.T) {
 		minute: []futures.Bar{minuteBar(21, 0, 100)},
 	}
 	src := NewStoredSource(st, live)
+	src.Cache.SetFreeMemory(func() uint64 { return 32 << 30 })
 	v := mustVariety(t, "RB")
 
 	if _, err := src.Daily(context.Background(), v); err != nil {
@@ -344,6 +346,7 @@ func TestStoredSourceDailyRoundTrip(t *testing.T) {
 	st := openStore(t)
 	live := &baseSource{name: "live", days: []futures.Daily{dailyBar(18, 99), dailyBar(19, 100)}}
 	src := NewStoredSource(st, live)
+	src.Cache.SetFreeMemory(func() uint64 { return 32 << 30 })
 	v := mustVariety(t, "CU")
 
 	days, err := src.Daily(context.Background(), v)

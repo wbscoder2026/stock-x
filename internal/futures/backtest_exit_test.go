@@ -192,7 +192,7 @@ func TestEvaluateMatchesAlertRecommendation(t *testing.T) {
 	}
 	bars := btBars(btBar(0, 1230, 1240, 1225, 1234), rest...)
 	o := evalFirst(t, []Event{btEvent(DirUp, 1234, 12.3)}, bars, "JM", Params{HoldBars: 6, StopATR: 1, RR: 1.5})
-	stop, tp := RecommendPrices("JM", DirUp, 1234, 12.3, 1, 1.5)
+	stop, tp := RecommendStop(StopInput{Prefix: "JM", Direction: DirUp, Entry: 1234, ATR: 12.3, StopATR: 1, RR: 1.5, StopMode: StopModeATR})
 	if o.StopPrice != stop || o.TPPrice != tp {
 		t.Fatalf("回测与提醒规则不一致：回测 %v/%v，提醒 %v/%v", o.StopPrice, o.TPPrice, stop, tp)
 	}

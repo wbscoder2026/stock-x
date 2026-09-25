@@ -1,16 +1,42 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { App, Button, DatePicker, Input, Progress, Select, Space, Table, Tag, Typography } from 'antd'
+import {
+  Alert,
+  App,
+  Button,
+  Card,
+  Collapse,
+  DatePicker,
+  Empty,
+  Input,
+  Modal,
+  Progress,
+  Select,
+  Space,
+  Spin,
+  Table,
+  Tag,
+  Tooltip,
+  Typography,
+} from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import type { Dayjs } from 'dayjs'
 import dayjs from 'dayjs'
 import {
+  fetchFuturesContracts,
   fetchFuturesLocal,
-  fetchFuturesLocalProgress,
+  fetchFuturesLocalDetail,
   pauseFuturesLocal,
   postFuturesLocalBackfill,
   resumeFuturesLocal,
 } from '../api'
-import type { FuturesBackfillStatus, FuturesLocalVariety, FuturesMemoryView } from '../types'
+import type {
+  FuturesBackfillStatus,
+  FuturesContract,
+  FuturesContractSpan,
+  FuturesLocalDetail,
+  FuturesLocalVariety,
+  FuturesMemoryView,
+} from '../types'
 
 type RangeValue = [Dayjs | null, Dayjs | null] | null
 
@@ -25,6 +51,12 @@ function formatBytes(n: number) {
   return `${Math.round(mb)} MB`
 }
 
+function fmtDur(sec: number) {
+  if (sec < 60) return `${sec} 秒`
+  if (sec < 3600) return `${Math.floor(sec / 60)} 分 ${sec % 60} 秒`
+  return `${Math.floor(sec / 3600)} 小时 ${Math.floor((sec % 3600) / 60)} 分`
+}
+
 function otherPeriods(row: FuturesLocalVariety) {
   return (row.periods ?? [])
     .filter((p) => p.period !== '1' && p.period !== '1d')
@@ -32,17 +64,83 @@ function otherPeriods(row: FuturesLocalVariety) {
     .join('；')
 }
 
-// 进度条读数：批量任务把「整批进度 + 当前标的进度」叠成一个 0~100；
-// 单标的（或后台自动补全）就用它自己的 percent。
-function progressOf(bf?: FuturesBackfillStatus) {
-  const total = bf?.total ?? 0
-  const done = bf?.done ?? 0
-  const percent = Math.max(0, Math.min(100, bf?.percent ?? 0))
-  if (total > 0) {
-    const pct = ((done + percent / 100) / total) * 100
-    return { pct: Math.max(0, Math.min(100, pct)), text: `第 ${Math.min(done + 1, total)}/${total} 个` }
-  }
-  return { pct: percent, text: '' }
+// MonthlyPanel 展开行：按月份看这个品种补到什么程度（二级分类的「月份」层）。
+function MonthlyPanel({
+  prefix,
+  contracts,
+  onOpen,
+}: {
+  prefix: string
+  contracts?: FuturesContractSpan[]
+  onOpen: (symbol: string) => void
+}) {
+  const [detail, setDetail] = useState<FuturesLocalDetail>()
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    let cancelled = false
+    void fetchFuturesLocalDetail(prefix)
+      .then((d) => {
+        if (!cancelled) setDetail(d)
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [prefix])
+
+  const minute = detail?.periods.find((p) => p.period === '1')
+  const months = minute?.months ?? []
+
+  return (
+    <div>
+      {loading ? (
+        <Spin size="small" />
+      ) : months.length === 0 ? (
+        <Typography.Text type="secondary">这个品种还没有 1 分钟数据</Typography.Text>
+      ) : (
+        <Table
+          size="small"
+          rowKey="month"
+          pagination={false}
+          scroll={{ x: 560 }}
+          columns={[
+            { title: '月份', dataIndex: 'month', width: 110 },
+            { title: '天数', dataIndex: 'days', width: 80 },
+            { title: '根数', dataIndex: 'bars', width: 90 },
+            {
+              title: '疑似缺失',
+              dataIndex: 'missing',
+              render: (v?: string[]) =>
+                v?.length ? (
+                  <Tooltip title={v.join('、')}>
+                    <Tag color="orange">{v.length} 天</Tag>
+                  </Tooltip>
+                ) : (
+                  '—'
+                ),
+            },
+          ]}
+          dataSource={[...months].reverse()}
+        />
+      )}
+      {contracts?.length ? (
+        <div style={{ marginTop: 8 }}>
+          <Typography.Text type="secondary" style={{ fontSize: 12, marginRight: 6 }}>
+            月份合约（点击查看该合约明细）：
+          </Typography.Text>
+          {contracts.map((c) => (
+            <Tag key={c.symbol} color="blue" style={{ cursor: 'pointer' }} onClick={() => onOpen(c.symbol)}>
+              {c.label} · {c.days} 天
+            </Tag>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  )
 }
 
 export default function FuturesLocalPage() {
@@ -51,11 +149,15 @@ export default function FuturesLocalPage() {
   const [backfill, setBackfill] = useState<FuturesBackfillStatus>()
   const [memory, setMemory] = useState<FuturesMemoryView>()
   const [q, setQ] = useState('')
-  const [kind, setKind] = useState<string>('all')
   const [prefix, setPrefix] = useState<string>()
   const [range, setRange] = useState<RangeValue>([dayjs().subtract(1, 'year'), dayjs()])
   const [loading, setLoading] = useState(false)
-  const [submitting, setSubmitting] = useState<string>()
+  const [submitting, setSubmitting] = useState(false)
+  const [detailOpen, setDetailOpen] = useState(false)
+  const [detailLoading, setDetailLoading] = useState(false)
+  const [detail, setDetail] = useState<FuturesLocalDetail>()
+  const [contracts, setContracts] = useState<FuturesContract[]>([])
+  const [targetSymbol, setTargetSymbol] = useState('') // 空 = 补主连
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -71,102 +173,78 @@ export default function FuturesLocalPage() {
     }
   }, [message])
 
-  // 覆盖表 10 秒一次（要查全库，别太频繁）；进度 1 秒一次（只回状态，很轻）
   useEffect(() => {
     void load()
     const timer = window.setInterval(() => {
       void load()
-    }, 10000)
+    }, 2000)
     return () => window.clearInterval(timer)
   }, [load])
 
+  // 选了品种就把它的合约拉出来，好让用户选「补主连还是补某个月份合约」
   useEffect(() => {
-    const tick = async () => {
-      try {
-        setBackfill(await fetchFuturesLocalProgress())
-      } catch {
-        // 进度拿不到不影响表格，下个 tick 再试
-      }
+    if (!prefix) return
+    let cancelled = false
+    void fetchFuturesContracts(prefix)
+      .then((list) => {
+        if (!cancelled) setContracts(list ?? [])
+      })
+      .catch(() => {
+        if (!cancelled) setContracts([])
+      })
+    return () => {
+      cancelled = true
     }
-    const timer = window.setInterval(() => void tick(), 1000)
-    return () => window.clearInterval(timer)
-  }, [])
+  }, [prefix])
 
   const rows = useMemo(() => {
     const key = q.trim().toUpperCase()
-    return items.filter((row) => {
-      if (kind !== 'all' && row.kind !== kind) return false
-      if (!key) return true
-      return row.prefix.includes(key) || row.name.includes(q.trim()) || row.symbol.includes(key)
-    })
-  }, [items, q, kind])
+    if (!key) return items
+    return items.filter((row) => row.prefix.includes(key) || row.name.includes(q.trim()) || row.symbol.includes(key))
+  }, [items, q])
 
-  async function run(body: Parameters<typeof postFuturesLocalBackfill>[0], okText: string, key: string) {
-    setSubmitting(key)
-    try {
-      await postFuturesLocalBackfill(body)
-      message.success(okText)
-      setBackfill(await fetchFuturesLocalProgress())
-      void load()
-    } catch (e) {
-      message.error(e instanceof Error ? e.message : '提交失败')
-    } finally {
-      setSubmitting(undefined)
-    }
-  }
-
-  // 补一个标的：行内按钮直接给代码，主连和月份都能补
-  function backfillSymbol(symbol: string) {
+  async function backfillOne(target: string) {
     const from = range?.[0]?.format('YYYY-MM-DD')
     const to = range?.[1]?.format('YYYY-MM-DD')
-    void run({ symbols: [symbol], from, to }, `已加入补全：${symbol}`, symbol)
-  }
-
-  const monthCount = useMemo(() => {
-    const n: Record<string, number> = {}
-    for (const row of items) {
-      if (row.kind === 'month') n[row.prefix] = (n[row.prefix] ?? 0) + 1
-    }
-    return n
-  }, [items])
-
-  // 补整个品种：主连 + 该品种在交易的全部月份合约一起排队，进度按整批算
-  function backfillVariety(target: string) {
     if (!target) {
       message.warning('请选择品种')
       return
     }
-    const from = range?.[0]?.format('YYYY-MM-DD')
-    const to = range?.[1]?.format('YYYY-MM-DD')
-    void run(
-      { prefix: target, kinds: ['main', 'months'], from, to },
-      `已加入补全：${target}（主连 + ${monthCount[target] ?? 0} 个月份）`,
-      target,
-    )
+    setSubmitting(true)
+    try {
+      await postFuturesLocalBackfill({ prefix: target, symbol: targetSymbol || undefined, from, to })
+      message.success(`已加入补全：${targetSymbol || `${target}0（主连）`}`)
+      await load()
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : '提交失败')
+    } finally {
+      setSubmitting(false)
+    }
   }
 
-  // 只补这个品种缺的月份（不动主连）
-  function backfillMonths(target: string) {
-    const from = range?.[0]?.format('YYYY-MM-DD')
-    const to = range?.[1]?.format('YYYY-MM-DD')
-    void run(
-      { prefix: target, kinds: ['months'], from, to },
-      `已加入补全：${target} 的 ${monthCount[target] ?? 0} 个月份合约`,
-      `${target}:months`,
-    )
+  async function openDetail(target: string, symbol?: string) {
+    setDetailOpen(true)
+    setDetailLoading(true)
+    try {
+      setDetail(await fetchFuturesLocalDetail(target, symbol))
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : '加载明细失败')
+      setDetailOpen(false)
+    } finally {
+      setDetailLoading(false)
+    }
   }
 
   const columns: ColumnsType<FuturesLocalVariety> = [
     { title: '品种', dataIndex: 'prefix', width: 80 },
     { title: '名称', dataIndex: 'name', width: 100 },
+    { title: '代码', dataIndex: 'symbol', width: 90 },
     {
-      title: '类型',
-      dataIndex: 'kind',
-      width: 90,
+      title: '月份合约',
+      width: 100,
       render: (_, row) =>
-        row.kind === 'month' ? <Tag color="blue">{row.label || '月份'}</Tag> : <Tag>{row.label || '主连'}</Tag>,
+        row.contracts?.length ? <Tooltip title={row.contracts.map((c) => c.symbol).join('、')}><Tag color="purple">{row.contracts.length} 个</Tag></Tooltip> : '—',
     },
-    { title: '代码', dataIndex: 'symbol', width: 100 },
     {
       title: '1分钟开始',
       width: 150,
@@ -181,6 +259,14 @@ export default function FuturesLocalPage() {
       title: '1分钟根数',
       width: 110,
       render: (_, row) => span(row, '1')?.bars ?? 0,
+    },
+    {
+      title: '1分钟天数',
+      width: 110,
+      render: (_, row) => {
+        const n = span(row, '1')?.days ?? 0
+        return n ? <Tag color="blue">{n} 天</Tag> : <Tag>无</Tag>
+      },
     },
     {
       title: '日线开始',
@@ -205,19 +291,13 @@ export default function FuturesLocalPage() {
       title: '操作',
       width: 170,
       render: (_, row) => (
-        <Space size={4}>
-          <Button size="small" loading={submitting === row.symbol} onClick={() => backfillSymbol(row.symbol)}>
+        <Space size={0}>
+          <Button size="small" loading={submitting && prefix === row.prefix} onClick={() => void backfillOne(row.prefix)}>
             补全
           </Button>
-          {row.kind === 'main' ? (
-            <Button
-              size="small"
-              loading={submitting === `${row.prefix}:months`}
-              onClick={() => backfillMonths(row.prefix)}
-            >
-              补全部月份{monthCount[row.prefix] ? `（${monthCount[row.prefix]}）` : ''}
-            </Button>
-          ) : null}
+          <Button size="small" type="link" onClick={() => void openDetail(row.prefix)}>
+            详情
+          </Button>
         </Space>
       ),
     },
@@ -225,13 +305,6 @@ export default function FuturesLocalPage() {
 
   const paused = !!backfill?.paused
   const fraction = Math.round((memory?.fraction ?? 0.7) * 100)
-  const { pct, text } = progressOf(backfill)
-  const active = !!backfill?.running || (backfill?.queued ?? 0) > 0
-  const targetText = backfill?.symbol
-    ? `${backfill.name ?? backfill.prefix} ${backfill.label || ''}（${backfill.symbol}）`.trim()
-    : backfill?.name
-      ? `${backfill.name}（${backfill.prefix}）`
-      : ''
 
   return (
     <div className="page-wrap">
@@ -239,17 +312,7 @@ export default function FuturesLocalPage() {
         <Typography.Title level={4} style={{ margin: 0 }}>
           本地期货数据
         </Typography.Title>
-        <Input.Search allowClear placeholder="品种/名称/代码" style={{ width: 180 }} onSearch={setQ} />
-        <Select
-          value={kind}
-          onChange={setKind}
-          style={{ width: 110 }}
-          options={[
-            { value: 'all', label: '全部标的' },
-            { value: 'main', label: '仅主连' },
-            { value: 'month', label: '仅月份' },
-          ]}
-        />
+        <Input.Search allowClear placeholder="品种或名称" style={{ width: 180 }} onSearch={setQ} />
         <Select
           showSearch
           allowClear
@@ -257,24 +320,37 @@ export default function FuturesLocalPage() {
           style={{ width: 160 }}
           value={prefix}
           optionFilterProp="label"
-          onChange={setPrefix}
-          options={items
-            .filter((row) => row.kind === 'main')
-            .map((row) => ({ value: row.prefix, label: `${row.prefix} ${row.name}` }))}
+          onChange={(v) => {
+            setPrefix(v)
+            setContracts([])
+            setTargetSymbol('')
+          }}
+          options={items.map((row) => ({ value: row.prefix, label: `${row.prefix} ${row.name}` }))}
+        />
+        <Select
+          showSearch
+          allowClear
+          placeholder="补全目标（默认主连）"
+          style={{ width: 200 }}
+          value={targetSymbol || undefined}
+          onChange={(v) => setTargetSymbol(v ?? '')}
+          options={[
+            { value: '', label: prefix ? `主连 ${prefix}0` : '主连（先选品种）' },
+            ...contracts
+              .filter((c) => c.kind !== 'main')
+              .map((c) => ({ value: c.symbol, label: `${c.label} · ${c.symbol}` })),
+          ]}
         />
         <DatePicker.RangePicker value={range} onChange={(v) => setRange(v)} allowClear />
-        <Button type="primary" loading={submitting === prefix} onClick={() => backfillVariety(prefix ?? '')}>
-          补全主连+全部月份
+        <Button type="primary" loading={submitting} onClick={() => void backfillOne(prefix ?? '')}>
+          补全所选区间
         </Button>
         <Button
           danger
           disabled={paused}
           onClick={() =>
             void pauseFuturesLocal()
-              .then((s) => {
-                setBackfill(s)
-                message.success('已暂停补全')
-              })
+              .then(() => message.success('已暂停补全'))
               .catch((e) => message.error(e instanceof Error ? e.message : '暂停失败'))
           }
         >
@@ -284,10 +360,7 @@ export default function FuturesLocalPage() {
           disabled={!paused}
           onClick={() =>
             void resumeFuturesLocal()
-              .then((s) => {
-                setBackfill(s)
-                message.success('已继续补全')
-              })
+              .then(() => message.success('已继续补全'))
               .catch((e) => message.error(e instanceof Error ? e.message : '继续失败'))
           }
         >
@@ -298,35 +371,128 @@ export default function FuturesLocalPage() {
         启动后会在后台慢慢补 1 分钟 K 线，一次只请求一页，并在请求之间留间隔，避免把接口打限流。上游能提供多远就补多远。
         内存缓存大约占用当前空闲内存的 {fraction}%：已用 {formatBytes(memory?.used_bytes ?? 0)} / 预算{' '}
         {formatBytes(memory?.budget_bytes ?? 0)}（系统空闲 {formatBytes(memory?.free_bytes ?? 0)}）。
-        补全只补 1 分钟；5/15/30/60/120 分钟由本地 1 分钟合成，等 1 分钟补得比它更深就不再问上游要了。
       </Typography.Paragraph>
-
-      <div style={{ marginBottom: 12 }}>
-        <Progress
-          percent={Math.round(pct)}
-          status={paused ? 'exception' : active ? 'active' : 'normal'}
-          size="small"
-          strokeColor={paused ? '#ff4d4f' : undefined}
-        />
-        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-          {paused ? '补全已暂停' : active ? '正在补全' : '空闲'}
-          {text ? ` · ${text}` : ''}
-          {targetText ? ` · ${targetText}` : ''}
-          {backfill?.oldest ? ` · 已到 ${backfill.oldest}` : ''}
-          {backfill?.message ? ` · ${backfill.message}` : ''}
-          {(backfill?.queued ?? 0) > 0 ? ` · 排队 ${backfill?.queued}` : ''}
-          {backfill?.total ? ` · 本批 ${backfill.done}/${backfill.total} 个标的` : ''}
-        </Typography.Text>
-      </div>
-
+      {backfill && (backfill.running || paused || backfill.percent) ? (
+        <Card size="small" style={{ marginBottom: 12 }} title="同步进度">
+          <Progress
+            percent={backfill.percent ?? 0}
+            status={paused ? 'exception' : backfill.running ? 'active' : 'normal'}
+          />
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            {paused ? '已暂停' : backfill.running ? '正在补全' : '空闲'}
+            {backfill.round_all ? ` · 本轮第 ${backfill.round_idx ?? 0}/${backfill.round_all} 个品种` : ''}
+            {backfill.name ? ` · 当前 ${backfill.name}（${backfill.prefix}）` : ''}
+            {backfill.total ? ` · 已翻 ${backfill.done ?? 0}/${backfill.total} 页` : ''}
+            {backfill.elapsed_sec ? ` · 已跑 ${fmtDur(backfill.elapsed_sec)}` : ''}
+            {backfill.saved ? ` · 已存 ${backfill.saved} 根` : ''}
+            {backfill.oldest ? ` · 已补到 ${backfill.oldest}` : ''}
+            {backfill.queued ? ` · 排队 ${backfill.queued}` : ''}
+          </Typography.Text>
+          {backfill.total ? (
+            <Progress
+              percent={Math.round(((backfill.done ?? 0) / backfill.total) * 100)}
+              size="small"
+              showInfo={false}
+              style={{ marginTop: 6, marginBottom: 0 }}
+            />
+          ) : null}
+          {backfill.message ? (
+            <div style={{ fontSize: 12, color: '#8c8c8c', marginTop: 4 }}>{backfill.message}</div>
+          ) : null}
+        </Card>
+      ) : null}
+      <Modal
+        open={detailOpen}
+        onCancel={() => setDetailOpen(false)}
+        footer={null}
+        width={900}
+        title={detail ? `${detail.name}（${detail.symbol}）同步明细` : '同步明细'}
+      >
+        {detailLoading || !detail ? (
+          <div style={{ textAlign: 'center', padding: 24 }}>
+            <Spin />
+          </div>
+        ) : detail.periods.length === 0 ? (
+          <Empty description="这个品种还没有任何本地数据" />
+        ) : (
+          <>
+            <Space wrap style={{ marginBottom: 10 }}>
+              <Tag color={detail.symbol.toUpperCase() === detail.prefix.toUpperCase() + '0' ? 'geekblue' : 'purple'}>
+                {detail.symbol.toUpperCase() === detail.prefix.toUpperCase() + '0' ? '主连' : '月份合约'}
+              </Tag>
+              <Tag color={detail.minute_synced ? 'green' : 'red'}>
+                {detail.minute_synced ? '已同步 1 分钟级别' : '没有 1 分钟级别数据'}
+              </Tag>
+              {detail.minute_synced ? (
+                <Typography.Text>
+                  1 分钟覆盖 <b>{detail.minute_days}</b> 天：{detail.minute_first} ~ {detail.minute_last}
+                </Typography.Text>
+              ) : null}
+            </Space>
+            {detail.periods.map((pd) => (
+              <Card
+                key={pd.period}
+                size="small"
+                type="inner"
+                style={{ marginBottom: 8 }}
+                title={`${pd.period === '1d' ? '日线' : pd.period + ' 分钟'}${
+                  pd.is_minute ? ' · 1 分钟级别' : ''
+                } · 共 ${pd.bars} 根 / ${pd.days.length} 天（${pd.first} ~ ${pd.last}）`}
+              >
+                {pd.missing?.length ? (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    style={{ marginBottom: 8 }}
+                    message={`首末之间有 ${pd.missing.length} 个工作日没有数据（节假日会有误报）`}
+                    description={pd.missing.join('、')}
+                  />
+                ) : null}
+                <Collapse
+                  size="small"
+                  items={[...pd.months].reverse().map((m) => ({
+                    key: m.month,
+                    label: `${m.month} · ${m.days} 天 · ${m.bars} 根${
+                      m.missing?.length ? ` · 疑似缺 ${m.missing.length} 天` : ''
+                    }`,
+                    children: (
+                      <Table
+                        size="small"
+                        rowKey="day"
+                        columns={[
+                          { title: '日期', dataIndex: 'day', width: 130 },
+                          { title: '星期', dataIndex: 'weekday', width: 90 },
+                          { title: '根数', dataIndex: 'bars', width: 100 },
+                        ]}
+                        dataSource={pd.days.filter((d) => d.day.startsWith(m.month)).reverse()}
+                        pagination={false}
+                        scroll={{ y: 240 }}
+                      />
+                    ),
+                  }))}
+                />
+              </Card>
+            ))}
+          </>
+        )}
+      </Modal>
       <Table
-        rowKey={(row) => `${row.prefix}-${row.symbol}`}
+        rowKey="prefix"
+        expandable={{
+          expandedRowRender: (row) => (
+            <MonthlyPanel
+              prefix={row.prefix}
+              contracts={row.contracts}
+              onOpen={(sym) => void openDetail(row.prefix, sym)}
+            />
+          ),
+        }}
         loading={loading && items.length === 0}
         columns={columns}
         dataSource={rows}
         size="small"
-        pagination={{ pageSize: 30, showSizeChanger: true, showTotal: (n) => `共 ${n} 个标的` }}
-        scroll={{ x: 1380 }}
+        pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (n) => `共 ${n} 个品种` }}
+        scroll={{ x: 1200 }}
       />
     </div>
   )

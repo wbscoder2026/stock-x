@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/wbscoder2026/stock-x/internal/backtest"
@@ -24,16 +25,21 @@ import (
 const Version = "0.1.0"
 
 type Server struct {
-	Store     *store.Store
-	Jobs      *job.Manager
-	Sched     *job.Scheduler
-	Cfg       config.Config
-	Watch     *futures.Watcher
-	Bars      *futuresync.StoredSource // 回测/研究用：本地优先，缺数据走网络并回写
-	Backfill  *futuresync.Backfiller   // 后台慢慢补 1 分钟历史
-	Contracts *futures.ContractCache   // 主力月份合约缓存（页面要按「主连/月份」分别补全）
-	News      *futures.NewsHub         // 期货新闻（多源抓取 + 去重排序）
-	cronFn    func()
+	Store   *store.Store
+	Jobs    *job.Manager
+	Sched   *job.Scheduler
+	Cfg     config.Config
+	Watch   *futures.Watcher
+	Quotes  *futures.QuoteService    // 浮窗实时报价（懒初始化）
+	Catalog *futures.ContractCatalog // 全市场合约清单（总览页）
+
+	quotesOnce  sync.Once
+	catalogOnce sync.Once
+
+	Bars     *futuresync.StoredSource // 回测/研究用：本地优先，缺数据走网络并回写
+	Backfill *futuresync.Backfiller   // 后台慢慢补 1 分钟历史
+	News     *futures.NewsHub         // 期货新闻（多源抓取 + 去重排序）
+	cronFn   func()
 }
 
 func New(st *store.Store, jobs *job.Manager, sched *job.Scheduler, cfg config.Config, cronFn func()) *Server {
@@ -41,8 +47,6 @@ func New(st *store.Store, jobs *job.Manager, sched *job.Scheduler, cfg config.Co
 		Store: st, Jobs: jobs, Sched: sched, Cfg: cfg, cronFn: cronFn,
 		Watch: futures.NewDefaultWatcher(),
 		Bars:  futuresync.NewStoredSource(st, futures.NewMultiSource(futures.DefaultSources()...)),
-		// 解析一次要打一次接口，所以结果缓存 30 分钟；页面轮询读的都是缓存
-		Contracts: futures.NewContractCache(futures.NewSinaContracts(nil), 30*time.Minute),
 	}
 	if cfg.FuturesNews {
 		names := strings.Split(cfg.FuturesNewsSources, ",")
@@ -319,13 +323,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/futures/favorites/delete", s.futuresFavoritesDelete)
 	mux.HandleFunc("POST /api/futures/favorites/scan", s.futuresFavoritesScan)
 	mux.HandleFunc("GET /api/futures/local", s.futuresLocal)
+	mux.HandleFunc("GET /api/futures/local/detail", s.futuresLocalDetail)
 	mux.HandleFunc("POST /api/futures/local/backfill", s.futuresLocalBackfill)
-	mux.HandleFunc("GET /api/futures/local/progress", s.futuresLocalProgress)
 	mux.HandleFunc("GET /api/futures/news", s.futuresNews)
 	mux.HandleFunc("POST /api/futures/news/refresh", s.futuresNewsRefresh)
 	mux.HandleFunc("POST /api/futures/local/pause", s.futuresLocalPause)
 	mux.HandleFunc("POST /api/futures/local/resume", s.futuresLocalResume)
 	mux.HandleFunc("GET /api/futures/contracts", s.futuresContracts)
+	mux.HandleFunc("GET /api/futures/quotes", s.futuresQuotes)
+	mux.HandleFunc("GET /api/futures/quotes/raw", s.futuresQuotesRaw)
+	mux.HandleFunc("GET /api/futures/overview", s.futuresOverview)
 	mux.HandleFunc("GET /api/futures/scan", s.futuresScan)
 	mux.HandleFunc("POST /api/futures/backtest", s.futuresBacktest)
 	mux.HandleFunc("POST /api/futures/sweep", s.futuresSweep)
@@ -890,7 +897,10 @@ func (s *Server) futuresWatchAlertTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 样例带上推荐价，让用户直接看到真实提醒的格式
-	stop, tp := futures.RecommendPrices("JM", "向上突破", 1523, 12, 1, futures.DefaultRR)
+	stop, tp := futures.RecommendStop(futures.StopInput{
+		Prefix: "JM", Direction: "向上突破", Entry: 1523, ATR: 12,
+		StopMode: futures.StopModeATR, StopATR: 1, RR: futures.DefaultRR,
+	})
 	events := []futures.WatchEvent{{
 		Fresh: true, Time: time.Now().In(futures.CSTZone()).Format("2006-01-02 15:04"),
 		Symbol: "JM0", Prefix: "JM", Name: "焦煤",

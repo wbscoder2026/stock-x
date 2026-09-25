@@ -155,11 +155,13 @@ type WatchEvent struct {
 	Close         float64 `json:"close"`
 	LevelPrice    float64 `json:"level_price"`
 	Volume        int64   `json:"volume"`
-	StopPrice     float64 `json:"stop_price"` // 推荐止损价（已对齐最小变动价位；0 = ATR 数据不足）
-	TPPrice       float64 `json:"tp_price"`   // 推荐止盈价（止损 stopATR×ATR，止盈 = 止损距离×RR）
-	RR            float64 `json:"rr"`         // 本次推荐用的盈亏比
-	StopATR       float64 `json:"stop_atr"`   // 本次推荐用的止损 ATR 倍数
-	TickSize      float64 `json:"tick_size"`  // 该品种最小变动价位（前端据此决定小数位）
+	StopPrice     float64 `json:"stop_price"`  // 推荐止损价（已对齐最小变动价位；0 = ATR 数据不足）
+	TPPrice       float64 `json:"tp_price"`    // 推荐止盈价（止盈距离 = 止损距离 × 盈亏比）
+	RR            float64 `json:"rr"`          // 本次推荐用的盈亏比
+	StopATR       float64 `json:"stop_atr"`    // 本次推荐用的止损 ATR 倍数
+	StopMode      string  `json:"stop_mode"`   // 止损方式：atr / prev_low
+	StopPoints    float64 `json:"stop_points"` // prev_low 模式的缓冲点数
+	TickSize      float64 `json:"tick_size"`   // 该品种最小变动价位（前端据此决定小数位）
 }
 
 // WatchStatus 监控状态
@@ -596,59 +598,122 @@ func eventATR(v float64) float64 {
 	return v
 }
 
-// RecommendPrices 推荐止损/止盈价：止损 = 现价 ∓ stopATR×ATR，止盈 = 现价 ± stopATR×ATR×盈亏比。
-// 结果按该品种最小变动价位对齐（挂得出去的价格），并保证两个价至少离入场价 1 个跳。
-// ATR 或价格无效时返回 0,0（前端显示「-」）。
-func RecommendPrices(prefix, direction string, entry, atr, stopATR, rr float64) (stop, tp float64) {
-	atr = eventATR(atr)
-	if atr <= 0 || !finite(entry) || entry <= 0 {
+// StopInput 计算推荐止损/止盈所需的输入。
+type StopInput struct {
+	Prefix     string  // 品种码（决定最小变动价位）
+	Direction  string  // 突破方向
+	Entry      float64 // 入场参考价 = 信号那根 K 线的收盘
+	ATR        float64 // atr 模式：止损距离 = StopATR × ATR
+	PrevLow    float64 // prev_low 模式：前一根最低（做多用）
+	PrevHigh   float64 // prev_low 模式：前一根最高（做空用）
+	StopMode   string  // atr | prev_low
+	StopATR    float64 // atr 模式的倍数
+	StopPoints float64 // prev_low 模式的缓冲点数
+	RR         float64 // 盈亏比
+}
+
+// RecommendStop 按止损方式算推荐止损/止盈（提醒与回测共用这一份，避免两边漂移）：
+//
+//	atr      → 止损 = 入场 ∓ StopATR×ATR，止盈距离 = 该距离 × 盈亏比
+//	prev_low → 做多止损 = 前一根最低 − StopPoints，做空 = 前一根最高 + StopPoints，
+//	           止盈距离 = 实际止损距离 × 盈亏比
+//
+// 两个价都按品种最小变动价位对齐，并保底离入场 1 个跳。
+// 数据不足时（价格非法 / ATR 为 0）返回 0,0；prev_low 缺「前一根」则退回 atr（不丢样本）。
+func RecommendStop(in StopInput) (stop, tp float64) {
+	if !finite(in.Entry) || in.Entry <= 0 {
 		return 0, 0
 	}
-	risk := atr * effectiveStopATR(stopATR) // 止损距离
-	take := risk * effectiveRR(rr)          // 止盈距离 = 止损距离 × 盈亏比
-	tick := TickSize(prefix)
-	base := RoundToTick(entry, tick)
-	down := direction == DirDown
+	tick := TickSize(in.Prefix)
+	base := RoundToTick(in.Entry, tick)
+	down := in.Direction == DirDown
+	rr := effectiveRR(in.RR)
 
-	rawStop, rawTake := entry-risk, entry+take
-	if down { // 向下突破：跌了止损、涨了止盈
-		rawStop, rawTake = entry+risk, entry-take
+	var risk float64
+	if normalizeStopMode(in.StopMode) == StopModePrevLow {
+		anchor := in.PrevLow
+		if down {
+			anchor = in.PrevHigh
+		}
+		if finite(anchor) && anchor > 0 {
+			pts := effectiveStopPoints(in.StopPoints)
+			raw := anchor - pts
+			if down {
+				raw = anchor + pts
+			}
+			stop = RoundToTick(raw, tick)
+			stop = floorStopSide(stop, base, tick, down)
+			risk = math.Abs(in.Entry - stop) // 止盈用「实际」止损距离
+		}
 	}
-	stop = RoundToTick(rawStop, tick)
-	tp = RoundToTick(rawTake, tick)
-
-	// ATR 比一个跳还小时，取整会把价格压到入场价上（等于没有止损）→ 保底各留 1 个跳
-	if down {
-		if stop < base+tick {
-			stop = base + tick
+	if risk <= 0 { // atr 模式；或 prev_low 缺前一根时退回
+		atr := eventATR(in.ATR)
+		if atr <= 0 {
+			return 0, 0
 		}
-		if tp > base-tick {
-			tp = base - tick
-		}
-	} else {
-		if stop > base-tick {
-			stop = base - tick
-		}
-		if tp < base+tick {
-			tp = base + tick
-		}
+		risk = atr * effectiveStopATR(in.StopATR)
+		stop = RoundToTick(entrySide(in.Entry, risk, down), tick)
+		stop = floorStopSide(stop, base, tick, down)
+	}
+	tp = RoundToTick(entrySide(in.Entry, risk*rr, !down), tick)
+	if tp > 0 {
+		tp = floorTPSide(stop, tp, base, tick, down)
 	}
 	return stop, tp
 }
 
+// entrySide 按突破方向取「减」或「加」：做多要向下（止损）/向上（止盈）。
+func entrySide(entry, dist float64, down bool) float64 {
+	if down {
+		return entry + dist
+	}
+	return entry - dist
+}
+
+// floorStopSide 止损至少离入场 1 个跳（取整把止损压到入场价上等于没止损）。
+func floorStopSide(stop, base, tick float64, down bool) float64 {
+	if down {
+		if stop < base+tick {
+			return base + tick
+		}
+		return stop
+	}
+	if stop > base-tick {
+		return base - tick
+	}
+	return stop
+}
+
+// floorTPSide 止盈同理，方向相反。
+func floorTPSide(stop, tp, base, tick float64, down bool) float64 {
+	if down {
+		if tp > base-tick {
+			return base - tick
+		}
+		return tp
+	}
+	if tp < base+tick {
+		return base + tick
+	}
+	return tp
+}
+
 // collectNew 过滤出没见过的事件；fresh = 事件落在上一轮最后 K 线之后（刚发生的）。
-// stopATR / rr 决定推荐止损（倍数×ATR）与止盈（止损距离×盈亏比）。
-func collectNew(seen map[string]int64, evs []Event, prevLastBar time.Time, day string, v Variety, stopATR, rr float64) []WatchEvent {
+// p 里的止损方式 / 倍数 / 点数 / 盈亏比决定推荐止损与止盈。
+func collectNew(seen map[string]int64, evs []Event, prevLastBar time.Time, day string, v Variety, p Params) []WatchEvent {
 	out := make([]WatchEvent, 0, len(evs))
-	rr = effectiveRR(rr)
-	stopATR = effectiveStopATR(stopATR)
+	p = mergeParams(p)
 	for _, e := range evs {
 		key := watchKey(v.Prefix, e)
 		if _, ok := seen[key]; ok {
 			continue
 		}
 		seen[key] = e.Time.Unix()
-		stop, tp := RecommendPrices(v.Prefix, e.Direction, e.Close, e.ATR, stopATR, rr)
+		stop, tp := RecommendStop(StopInput{
+			Prefix: v.Prefix, Direction: e.Direction, Entry: e.Close, ATR: e.ATR,
+			PrevLow: e.PrevLow, PrevHigh: e.PrevHigh,
+			StopMode: p.StopMode, StopATR: p.StopATR, StopPoints: p.StopPoints, RR: p.RR,
+		})
 		out = append(out, WatchEvent{
 			Fresh:      !prevLastBar.IsZero() && e.Time.After(prevLastBar),
 			Day:        day,
@@ -664,8 +729,10 @@ func collectNew(seen map[string]int64, evs []Event, prevLastBar time.Time, day s
 			Volume:     e.Volume,
 			StopPrice:  stop,
 			TPPrice:    tp,
-			RR:         rr,
-			StopATR:    stopATR,
+			RR:         effectiveRR(p.RR),
+			StopATR:    effectiveStopATR(p.StopATR),
+			StopMode:   normalizeStopMode(p.StopMode),
+			StopPoints: effectiveStopPoints(p.StopPoints),
 			TickSize:   TickSize(v.Prefix),
 		})
 	}
@@ -876,7 +943,7 @@ func (t *Watcher) tick() {
 		day := truncateDate(oc.lastBar).Format("2006-01-02")
 		prev := t.lastBar[oc.v.Prefix]
 		events := filterBlacklisted(oc.events, oc.v.Prefix, t.contractCache[oc.v.Prefix].symbol, t.blacklist)
-		fresh := collectNew(t.seen, events, prev, day, oc.v, t.cfg.Params.StopATR, t.cfg.Params.RR)
+		fresh := collectNew(t.seen, events, prev, day, oc.v, t.cfg.Params)
 		for i := range fresh {
 			t.seq++
 			fresh[i].Seq = t.seq

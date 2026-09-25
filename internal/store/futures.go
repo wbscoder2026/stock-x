@@ -156,6 +156,59 @@ func (s *Store) FuturesLastTime(symbol, period string) (time.Time, bool, error) 
 }
 
 // FuturesCoverage 全部品种/周期的覆盖情况（给 CLI 与前端看）。
+// FuturesDayCount 某个合约某级别在「某一天」有多少根 K 线（按北京时间分组）。
+type FuturesDayCount struct {
+	Day  string `json:"day"` // 2006-01-02（北京时间）
+	Bars int    `json:"bars"`
+}
+
+// FuturesCoverageDayCounts 一次拿全市场「每个 symbol+period 覆盖了多少天」。
+// key 是 `symbol|period`。页面每 2 秒轮询一次，所以必须一次查完，不能逐品种问。
+func (s *Store) FuturesCoverageDayCounts() (map[string]int, error) {
+	rows, err := s.db.Query(`
+SELECT symbol, period, COUNT(DISTINCT date(ts,'unixepoch','+8 hours'))
+FROM futures_bar GROUP BY symbol, period`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var symbol, period string
+		var days int
+		if err := rows.Scan(&symbol, &period, &days); err != nil {
+			return nil, err
+		}
+		out[symbol+"|"+period] = days
+	}
+	return out, rows.Err()
+}
+
+// FuturesCoverageDays 按天统计覆盖情况（升序）。
+// 页面要回答「到底同步了哪些日期」—— 光看起止日期看不出中间有没有断档。
+func (s *Store) FuturesCoverageDays(symbol, period string) ([]FuturesDayCount, error) {
+	if symbol == "" || period == "" {
+		return []FuturesDayCount{}, nil
+	}
+	rows, err := s.db.Query(`
+SELECT date(ts,'unixepoch','+8 hours') AS d, COUNT(*) AS n
+FROM futures_bar WHERE symbol=? AND period=?
+GROUP BY d ORDER BY d`, symbol, period)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []FuturesDayCount{}
+	for rows.Next() {
+		var item FuturesDayCount
+		if err := rows.Scan(&item.Day, &item.Bars); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) FuturesCoverage() ([]FuturesCoverage, error) {
 	rows, err := s.db.Query(`
 SELECT symbol, period, COUNT(*) AS n, MIN(ts), MAX(ts)

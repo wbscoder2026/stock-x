@@ -21,7 +21,8 @@ type Client struct {
 	HTTP      *http.Client
 	MinuteURL string
 	DailyURL  string
-	HQURL     string
+	HQURL     string // 行情中心（合约清单，含持仓量）
+	HQListURL string // 实时行情（hq.sinajs.cn/list=，含买一卖一）
 }
 
 func (c *Client) http() *http.Client {

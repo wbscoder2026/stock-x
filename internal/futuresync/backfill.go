@@ -30,13 +30,13 @@ type minuteRanger interface {
 	MinuteRange(ctx context.Context, v futures.Variety, period string, end time.Time, limit int) ([]futures.Bar, error)
 }
 
-// symbolMinuteRanger 能按「具体合约代码」翻分钟线的源；月份合约（JM2701）只能走这一层。
-type symbolMinuteRanger interface {
+// minuteSymbolRanger 能按「合约代码」翻分钟线的源（补月份合约必须靠它）。
+type minuteSymbolRanger interface {
 	MinuteRangeSymbol(ctx context.Context, symbol, period string, end time.Time, limit int) ([]futures.Bar, error)
 }
 
-// BackfillRequest 补某一个标的。Symbol 是合约代码（JM0 主连 / JM2701 月份）；
-// 留空表示补该品种的主连。From/To 为零表示不限制那一端。
+// BackfillRequest 手动补某一个品种。From/To 为零表示不限制那一端。
+// Symbol 为空 = 补主连（JM0）；填了就是补具体月份合约（如 JM2601）。
 type BackfillRequest struct {
 	Prefix string
 	Symbol string
@@ -45,28 +45,29 @@ type BackfillRequest struct {
 }
 
 // BackfillStatus 补全进度，给页面轮询。
-//
-// Percent 是「当前这一个标的」的进度（按已挖到的时间占目标区间的比例）；
-// Done/Total 是「这一批」的进度（批量补全主连+月份时用）。两者叠起来就能画出完整的进度条。
 type BackfillStatus struct {
-	Paused  bool    `json:"paused"`
-	Running bool    `json:"running"`
-	Mode    string  `json:"mode"` // auto | manual | idle
-	Prefix  string  `json:"prefix"`
-	Name    string  `json:"name"`
-	Symbol  string  `json:"symbol"` // 正在补的合约代码
-	Kind    string  `json:"kind"`   // main（主连）| month（月份）
-	Label   string  `json:"label"`  // 主连 / 2701
-	Period  string  `json:"period"`
-	From    string  `json:"from"`
-	To      string  `json:"to"`
-	Oldest  string  `json:"oldest"`
-	Saved   int     `json:"saved"`
-	Message string  `json:"message"`
-	Queued  int     `json:"queued"`
-	Done    int     `json:"done"`    // 本批已完成的标的数
-	Total   int     `json:"total"`   // 本批标的总数（0 = 不是批量任务）
-	Percent float64 `json:"percent"` // 当前标的进度 0~100
+	Paused  bool   `json:"paused"`
+	Running bool   `json:"running"`
+	Mode    string `json:"mode"` // auto | manual | idle
+	Prefix  string `json:"prefix"`
+	Name    string `json:"name"`
+	Symbol  string `json:"symbol"` // 正在补的代码（主连 JM0 或月份合约 JM2601）
+	Period  string `json:"period"`
+	From    string `json:"from"`
+	To      string `json:"to"`
+	Oldest  string `json:"oldest"`
+	Saved   int    `json:"saved"`
+	Message string `json:"message"`
+	Queued  int    `json:"queued"`
+	// 进度：页面靠它画进度条。Done/Total = 当前品种已翻/计划翻的页数；
+	// RoundIdx/RoundAll = 本轮第几个品种 / 共几个（自动模式一轮扫完所有品种）。
+	Done       int   `json:"done"`
+	Total      int   `json:"total"`
+	RoundIdx   int   `json:"round_idx"`
+	RoundAll   int   `json:"round_all"`
+	Percent    int   `json:"percent"`     // 0~100，由上面的字段算出来
+	StartedAt  int64 `json:"started_at"`  // 当前这轮开始的 unix 秒
+	ElapsedSec int   `json:"elapsed_sec"` // 当前这轮已跑秒数
 }
 
 // Backfiller 后台慢慢补 1 分钟历史：一次只打一个请求，请求之间留间隔，避免把接口打限流。
@@ -76,19 +77,17 @@ type Backfiller struct {
 	Live  futures.BarSource
 	Pace  time.Duration
 
-	mu         sync.Mutex
-	paused     bool
-	resume     chan struct{}
-	manual     []BackfillRequest
-	kick       chan struct{}
-	varieties  []futures.Variety
-	cursor     int
-	status     BackfillStatus
-	retryAt    map[string]time.Time
-	histDone   map[string]time.Time
-	roundDeep  bool
-	batchDone  int // 本批已完成的标的数
-	batchTotal int // 本批标的总数
+	mu        sync.Mutex
+	paused    bool
+	resume    chan struct{}
+	manual    []BackfillRequest
+	kick      chan struct{}
+	varieties []futures.Variety
+	cursor    int
+	status    BackfillStatus
+	retryAt   map[string]time.Time
+	histDone  map[string]time.Time
+	roundDeep bool
 }
 
 func NewBackfiller(st *store.Store, cache *BarCache, live futures.BarSource) *Backfiller {
@@ -126,8 +125,30 @@ func (b *Backfiller) Status() BackfillStatus {
 	st := b.status
 	st.Paused = b.paused
 	st.Queued = len(b.manual)
-	st.Done = b.batchDone
-	st.Total = b.batchTotal
+	// 百分比 =（本轮已跑完的品种数 + 当前品种的页内进度）÷ 本轮品种总数
+	st.Percent = 0
+	if st.RoundAll > 0 {
+		done := st.RoundIdx - 1
+		if done < 0 {
+			done = 0
+		}
+		frac := float64(done)
+		if st.Total > 0 && st.Done > 0 {
+			f := float64(st.Done) / float64(st.Total)
+			if f > 1 {
+				f = 1
+			}
+			frac += f
+		}
+		st.Percent = int(frac / float64(st.RoundAll) * 100)
+		if st.Percent > 100 {
+			st.Percent = 100
+		}
+	}
+	st.ElapsedSec = 0
+	if st.StartedAt > 0 {
+		st.ElapsedSec = int(time.Now().Unix() - st.StartedAt)
+	}
 	return st
 }
 
@@ -166,78 +187,23 @@ func (b *Backfiller) Resume() error {
 	return nil
 }
 
-// Enqueue 插队补一个标的。正在跑的自动任务会在当前这一页之后让路。
+// Enqueue 插队补某个品种。正在跑的自动任务会在当前这一页之后让路。
 func (b *Backfiller) Enqueue(req BackfillRequest) error {
-	return b.EnqueueAll([]BackfillRequest{req})
-}
-
-// EnqueueAll 一次排一批标的（比如「主连 + 月份」），进度按整批算。
-// 校验是整批一起做的：有一个不合法就全部不排队，免得排进去一半。
-func (b *Backfiller) EnqueueAll(reqs []BackfillRequest) error {
-	if len(reqs) == 0 {
-		return fmt.Errorf("请指定要补的标的")
-	}
-	norm := make([]BackfillRequest, 0, len(reqs))
-	for _, req := range reqs {
-		if err := b.normalize(&req); err != nil {
-			return err
-		}
-		if !req.From.IsZero() && !req.To.IsZero() && req.From.After(req.To) {
-			return fmt.Errorf("开始日期不能晚于结束日期")
-		}
-		norm = append(norm, req)
-	}
-	b.mu.Lock()
-	// 上一批已经跑完（done 追上 total）就归零，新的一批从 0 开始数
-	if b.batchTotal > 0 && b.batchDone >= b.batchTotal {
-		b.batchDone = 0
-		b.batchTotal = 0
-	}
-	b.manual = append(b.manual, norm...)
-	b.batchTotal += len(norm)
-	b.mu.Unlock()
-	b.nudge()
-	return nil
-}
-
-// normalize 把请求补全成「品种 + 合约代码」：给了合约代码就能反查品种，
-// 两个都没有（或对不上）就直接报错，别等到开跑时才发现。
-func (b *Backfiller) normalize(req *BackfillRequest) error {
-	req.Symbol = strings.ToUpper(strings.TrimSpace(req.Symbol))
 	req.Prefix = strings.ToUpper(strings.TrimSpace(req.Prefix))
-	if req.Symbol != "" {
-		v, ok := futures.VarietyOfSymbol(req.Symbol)
-		if !ok {
-			return fmt.Errorf("未知合约 %s", req.Symbol)
-		}
-		if req.Prefix == "" {
-			req.Prefix = v.Prefix
-		} else if !strings.EqualFold(req.Prefix, v.Prefix) {
-			return fmt.Errorf("合约 %s 不属于品种 %s", req.Symbol, req.Prefix)
-		}
-		return nil
-	}
 	if req.Prefix == "" {
-		return fmt.Errorf("请指定品种或合约")
+		return fmt.Errorf("请指定品种")
 	}
 	if _, ok := b.varietyOf(req.Prefix); !ok {
 		return fmt.Errorf("未知品种 %s", req.Prefix)
 	}
-	return nil
-}
-
-// finishTarget 一个标的补完，推进整批进度；整批跑完且队列也空了才归零
-// （留着 done==total 让页面能看到「跑满了」而不是瞬间跳回 0）。
-func (b *Backfiller) finishTarget() {
-	b.mu.Lock()
-	if b.batchTotal > 0 {
-		b.batchDone++
-		if b.batchDone >= b.batchTotal && len(b.manual) == 0 {
-			b.batchDone = 0
-			b.batchTotal = 0
-		}
+	if !req.From.IsZero() && !req.To.IsZero() && req.From.After(req.To) {
+		return fmt.Errorf("开始日期不能晚于结束日期")
 	}
+	b.mu.Lock()
+	b.manual = append(b.manual, req)
 	b.mu.Unlock()
+	b.nudge()
+	return nil
 }
 
 func (b *Backfiller) nudge() {
@@ -261,12 +227,7 @@ func (b *Backfiller) Run(ctx context.Context) error {
 		}
 		if req, ok := b.popManual(); ok {
 			v, _ := b.varietyOf(req.Prefix)
-			symbol := req.Symbol
-			if symbol == "" {
-				symbol = futures.MainSymbol(v)
-			}
-			b.visit(ctx, v, symbol, req.From, req.To, true)
-			b.finishTarget()
+			b.visit(ctx, v, req.Symbol, req.From, req.To, true)
 			continue
 		}
 		v, ok := b.nextVariety()
@@ -276,7 +237,7 @@ func (b *Backfiller) Run(ctx context.Context) error {
 			}
 			continue
 		}
-		deep := b.visit(ctx, v, futures.MainSymbol(v), time.Time{}, time.Time{}, false)
+		deep := b.visit(ctx, v, "", time.Time{}, time.Time{}, false)
 		if deep {
 			b.roundDeep = true
 		}
@@ -357,6 +318,8 @@ func (b *Backfiller) nextVariety() (futures.Variety, bool) {
 		if until, ok := b.retryAt[v.Prefix]; ok && time.Now().Before(until) {
 			continue
 		}
+		b.status.RoundIdx = idx + 1
+		b.status.RoundAll = len(list)
 		return v, true
 	}
 	return futures.Variety{}, false
@@ -387,26 +350,32 @@ func (b *Backfiller) varietyOf(prefix string) (futures.Variety, bool) {
 }
 
 // visit 往前翻若干页。返回值表示这一轮有没有在挖更早的历史（而不是只刷新最新一页）。
-// symbol 是具体合约代码：主连（JM0）或月份合约（JM2701）。
+// visit 往前翻若干页。symbol 为空表示补主连，否则补该月份合约。
 func (b *Backfiller) visit(ctx context.Context, v futures.Variety, symbol string, from, to time.Time, manual bool) bool {
 	pages := defaultVisitPages
 	if manual {
 		pages = manualVisitPages
-	} else if b.historySettled(symbol) {
+	} else if b.historySettled(v.Prefix) {
 		pages = 1
 	}
-	last, hadHistory, _ := b.Store.FuturesLastTime(symbol, backfillPeriod)
-	// 进度尺：从「本地最新」往「目标起点」挖，挖到哪儿算哪儿。
-	// 没指定 from（自动模式）时测不出总量，Percent 就一直是 0，页面按不确定态显示。
-	progStart := time.Now().In(backfillCST)
-	if hadHistory && last.After(progStart) {
-		progStart = last.In(backfillCST)
+	// 补全目标：没指定就补主连（JM0），指定了就补该月份合约（JM2601）
+	if strings.TrimSpace(symbol) == "" {
+		symbol = futures.MainSymbol(v)
 	}
-	progGoal := from
+	symbol = strings.ToUpper(strings.TrimSpace(symbol))
+	// 本轮位置：手动补全不走 nextVariety，这里自己算，页面才看得到「第几个品种」
+	list := b.varietyList()
+	roundIdx := 0
+	for i, item := range list {
+		if strings.EqualFold(item.Prefix, v.Prefix) {
+			roundIdx = i + 1
+			break
+		}
+	}
+	_, hadHistory, _ := b.Store.FuturesLastTime(symbol, backfillPeriod)
 	end := time.Time{}
 	var prevOldest time.Time
 	deep := false
-	label := futures.SymbolLabel(symbol)
 	b.setStatus(func(st *BackfillStatus) {
 		st.Running = true
 		st.Mode = "auto"
@@ -416,13 +385,15 @@ func (b *Backfiller) visit(ctx context.Context, v futures.Variety, symbol string
 		st.Prefix = v.Prefix
 		st.Name = v.Name
 		st.Symbol = symbol
-		st.Kind = futures.SymbolKind(symbol)
-		st.Label = label
 		st.Period = backfillPeriod
 		st.From = formatDay(from)
 		st.To = formatDay(to)
-		st.Percent = 0
-		st.Message = fmt.Sprintf("正在补 %s %s 1分钟", v.Name, label)
+		st.Message = fmt.Sprintf("正在补 %s 1分钟", targetLabel(v, symbol))
+		st.Total = pages
+		st.Done = 0
+		st.RoundIdx = roundIdx
+		st.RoundAll = len(list)
+		st.StartedAt = time.Now().Unix()
 	})
 	defer b.setStatus(func(st *BackfillStatus) { st.Running = false })
 
@@ -440,18 +411,18 @@ func (b *Backfiller) visit(ctx context.Context, v futures.Variety, symbol string
 			return deep
 		}
 		bars, err := b.fetch(ctx, v, symbol, end)
+		b.setStatus(func(st *BackfillStatus) { st.Done = page + 1 }) // 翻完一页就 +1（失败也算，页面看得到在动）
 		if err != nil {
 			if isNoMore(err) {
-				b.markHistoryDone(symbol)
+				b.markHistoryDone(v.Prefix)
 				b.setStatus(func(st *BackfillStatus) {
-					st.Percent = 100
-					st.Message = fmt.Sprintf("%s %s 上游没有更早的 1 分钟数据", v.Name, label)
+					st.Message = fmt.Sprintf("%s 上游没有更早的 1 分钟数据", v.Name)
 				})
 				return deep
 			}
-			b.markRetry(symbol)
+			b.markRetry(v.Prefix)
 			b.setStatus(func(st *BackfillStatus) {
-				st.Message = fmt.Sprintf("%s %s 暂缓：%v", v.Name, label, err)
+				st.Message = fmt.Sprintf("%s 暂缓：%v", v.Name, err)
 			})
 			return deep
 		}
@@ -466,14 +437,10 @@ func (b *Backfiller) visit(ctx context.Context, v futures.Variety, symbol string
 			}
 			touchCache(b.Cache, symbol, backfillPeriod, rows, hadHistory || page > 0, rows)
 			hadHistory = true
-			pct := progressPercent(progStart, progGoal, oldest)
 			b.setStatus(func(st *BackfillStatus) {
 				st.Saved += n
 				st.Oldest = oldest.In(backfillCST).Format("2006-01-02 15:04")
-				if pct > st.Percent {
-					st.Percent = pct
-				}
-				st.Message = fmt.Sprintf("%s %s 1分钟已补到 %s（本页 +%d）", v.Name, label, st.Oldest, n)
+				st.Message = fmt.Sprintf("%s 1分钟已补到 %s（本页 +%d）", v.Name, st.Oldest, n)
 			})
 		}
 		if page > 0 {
@@ -481,16 +448,14 @@ func (b *Backfiller) visit(ctx context.Context, v futures.Variety, symbol string
 		}
 		if !from.IsZero() && !oldest.After(from) {
 			b.setStatus(func(st *BackfillStatus) {
-				st.Percent = 100
-				st.Message = fmt.Sprintf("%s %s 已补到指定起点 %s", v.Name, label, formatDay(from))
+				st.Message = fmt.Sprintf("%s 已补到指定起点 %s", v.Name, formatDay(from))
 			})
 			return deep
 		}
 		if !prevOldest.IsZero() && !oldest.Before(prevOldest) {
-			b.markHistoryDone(symbol)
+			b.markHistoryDone(v.Prefix)
 			b.setStatus(func(st *BackfillStatus) {
-				st.Percent = 100
-				st.Message = fmt.Sprintf("%s %s 1分钟历史暂时到此（%s）", v.Name, label, oldest.In(backfillCST).Format("2006-01-02"))
+				st.Message = fmt.Sprintf("%s 1分钟历史暂时到此（%s）", v.Name, oldest.In(backfillCST).Format("2006-01-02"))
 			})
 			return deep
 		}
@@ -500,10 +465,9 @@ func (b *Backfiller) visit(ctx context.Context, v futures.Variety, symbol string
 	return deep
 }
 
-// fetch 按合约代码翻一页。月份合约必须走 symbolMinuteRanger（品种口径只认主连）；
-// 源不支持时退回品种口径，主连照样能补。
 func (b *Backfiller) fetch(ctx context.Context, v futures.Variety, symbol string, end time.Time) ([]futures.Bar, error) {
-	if rs, ok := b.Live.(symbolMinuteRanger); ok {
+	// 优先按合约代码取（补月份合约只能走这条路）
+	if rs, ok := b.Live.(minuteSymbolRanger); ok {
 		return rs.MinuteRangeSymbol(ctx, symbol, backfillPeriod, end, 0)
 	}
 	rs, ok := b.Live.(minuteRanger)
@@ -513,24 +477,12 @@ func (b *Backfiller) fetch(ctx context.Context, v futures.Variety, symbol string
 	return rs.MinuteRange(ctx, v, backfillPeriod, end, 0)
 }
 
-// progressPercent 当前标的挖到 oldest 时的进度：以「本地最新 → 目标起点」为总量算比例。
-// 目标起点未知（自动补全）时测不出来，返回 0。
-func progressPercent(start, goal, oldest time.Time) float64 {
-	if start.IsZero() || goal.IsZero() || oldest.IsZero() {
-		return 0
+// targetLabel 进度文案里的目标名：主连说「焦煤主连」，合约直接说代码。
+func targetLabel(v futures.Variety, symbol string) string {
+	if symbol == "" || symbol == futures.MainSymbol(v) {
+		return v.Name + "主连"
 	}
-	total := start.Sub(goal)
-	if total <= 0 {
-		return 0
-	}
-	pct := float64(start.Sub(oldest)) / float64(total) * 100
-	if pct < 0 {
-		return 0
-	}
-	if pct > 100 {
-		return 100
-	}
-	return pct
+	return symbol
 }
 
 func (b *Backfiller) gap() time.Duration {
@@ -610,29 +562,216 @@ func formatDay(t time.Time) string {
 	return t.In(backfillCST).Format("2006-01-02")
 }
 
+// DayDetail 某一天同步到了多少根 K 线。
+type DayDetail struct {
+	Day     string `json:"day"` // 2006-01-02（北京时间）
+	Bars    int    `json:"bars"`
+	Weekday string `json:"weekday"` // 周一…周日（页面直接展示）
+}
+
+// MonthGroup 一个月的覆盖汇总 —— 二级分类的「月份」层，下面才是具体日期。
+type MonthGroup struct {
+	Month   string   `json:"month"` // 2026-09
+	Days    int      `json:"days"`
+	Bars    int      `json:"bars"`
+	Missing []string `json:"missing,omitempty"`
+}
+
+// PeriodDetail 一个周期的明细：是否 1 分钟级别 + 已同步的每一天 + 首末之间的工作日缺口。
+type PeriodDetail struct {
+	Period   string      `json:"period"`
+	IsMinute bool        `json:"is_minute"` // period == "1"
+	Bars     int         `json:"bars"`
+	First    string      `json:"first"`
+	Last     string      `json:"last"`
+	Days     []DayDetail `json:"days"`
+	// Months 按月份汇总：页面做「月份 → 日期」二级分类就靠它。
+	Months []MonthGroup `json:"months"`
+	// Missing 首末之间「工作日却没有数据」的日期。节假日会误报，页面上按「疑似缺失」措辞。
+	Missing []string `json:"missing,omitempty"`
+}
+
+// VarietyDetail 一个品种的同步明细（页面点「详情」看的就是它）。
+type VarietyDetail struct {
+	Prefix       string         `json:"prefix"`
+	Name         string         `json:"name"`
+	Symbol       string         `json:"symbol"`
+	MinuteSynced bool           `json:"minute_synced"` // 有没有 1 分钟级别的数据
+	MinuteDays   int            `json:"minute_days"`   // 1 分钟覆盖了多少天
+	MinuteFirst  string         `json:"minute_first"`
+	MinuteLast   string         `json:"minute_last"`
+	Periods      []PeriodDetail `json:"periods"`
+}
+
+// localPeriods 明细里要展开的周期顺序（1 分钟在最前，日线在最后）。
+var localPeriods = []string{"1", "5", "15", "30", "60", "120", "1d"}
+
+var weekdayCN = [...]string{"周日", "周一", "周二", "周三", "周四", "周五", "周六"}
+
+// LocalDetail 一个品种「到底同步了哪些日期」。
+// 只有起止日期看不出中间有没有断档 —— 所以这里按天列出，顺便标出工作日缺口。
+// LocalDetail 一个品种「到底同步了哪些日期」。symbol 为空看主连，否则看该月份合约。
+// 只有起止日期看不出中间有没有断档 —— 所以这里按天列出，并按月份做二级分类。
+func LocalDetail(st *store.Store, prefix, symbol string) (VarietyDetail, error) {
+	if st == nil {
+		return VarietyDetail{}, fmt.Errorf("缺少本地存储")
+	}
+	var v futures.Variety
+	found := false
+	for _, item := range futures.ListVarieties() {
+		if strings.EqualFold(item.Prefix, prefix) {
+			v, found = item, true
+			break
+		}
+	}
+	if !found {
+		return VarietyDetail{}, fmt.Errorf("未知品种 %q", prefix)
+	}
+	symbol = strings.ToUpper(strings.TrimSpace(symbol))
+	if symbol == "" {
+		symbol = futures.MainSymbol(v)
+	}
+	// 代码必须属于这个品种，别让 JM 的页面读到 RB 的数据
+	owner, ok := futures.VarietyOfSymbol(symbol)
+	if !ok || !strings.EqualFold(owner.Prefix, v.Prefix) {
+		return VarietyDetail{}, fmt.Errorf("%s 不属于品种 %s", symbol, v.Prefix)
+	}
+	out := VarietyDetail{Prefix: v.Prefix, Name: v.Name, Symbol: symbol, Periods: []PeriodDetail{}}
+
+	for _, period := range localPeriods {
+		days, err := st.FuturesCoverageDays(symbol, period)
+		if err != nil {
+			return VarietyDetail{}, err
+		}
+		if len(days) == 0 {
+			continue // 这个级别还没同步过，不展示空行
+		}
+		detail := PeriodDetail{
+			Period:   period,
+			IsMinute: period == backfillPeriod,
+			First:    days[0].Day,
+			Last:     days[len(days)-1].Day,
+			Days:     make([]DayDetail, 0, len(days)),
+		}
+		have := map[string]int{}
+		for _, d := range days {
+			have[d.Day] = d.Bars
+			detail.Bars += d.Bars
+			wd := ""
+			if t, err := time.Parse("2006-01-02", d.Day); err == nil {
+				wd = weekdayCN[t.Weekday()]
+			}
+			detail.Days = append(detail.Days, DayDetail{Day: d.Day, Bars: d.Bars, Weekday: wd})
+		}
+		detail.Missing = weekdayGaps(detail.First, detail.Last, have)
+		detail.Months = monthGroups(detail.Days)
+		out.Periods = append(out.Periods, detail)
+	}
+
+	for _, pd := range out.Periods {
+		if !pd.IsMinute {
+			continue
+		}
+		out.MinuteSynced = true
+		out.MinuteDays = len(pd.Days)
+		out.MinuteFirst, out.MinuteLast = pd.First, pd.Last
+	}
+	return out, nil
+}
+
+// monthGroups 把「按天明细」汇总成月份（升序），并算出每月的工作日缺口。
+func monthGroups(days []DayDetail) []MonthGroup {
+	if len(days) == 0 {
+		return nil
+	}
+	out := []MonthGroup{}
+	index := map[string]int{}
+	for _, d := range days {
+		if len(d.Day) < 7 {
+			continue
+		}
+		key := d.Day[:7]
+		i, ok := index[key]
+		if !ok {
+			index[key] = len(out)
+			out = append(out, MonthGroup{Month: key})
+			i = len(out) - 1
+		}
+		out[i].Days++
+		out[i].Bars += d.Bars
+	}
+	// 每月内部再看一次工作日缺口
+	for i := range out {
+		have := map[string]int{}
+		first, last := "", ""
+		for _, d := range days {
+			if len(d.Day) < 7 || d.Day[:7] != out[i].Month {
+				continue
+			}
+			have[d.Day] = d.Bars
+			if first == "" {
+				first = d.Day
+			}
+			last = d.Day
+		}
+		out[i].Missing = weekdayGaps(first, last, have)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Month < out[j].Month })
+	return out
+}
+
+// weekdayGaps 首末之间「周一至周五却没有数据」的日期（升序）。
+func weekdayGaps(first, last string, have map[string]int) []string {
+	start, err := time.Parse("2006-01-02", first)
+	if err != nil {
+		return nil
+	}
+	end, err := time.Parse("2006-01-02", last)
+	if err != nil {
+		return nil
+	}
+	out := []string{}
+	for d := start; !d.After(end); d = d.AddDate(0, 0, 1) {
+		wd := d.Weekday()
+		if wd == time.Saturday || wd == time.Sunday {
+			continue
+		}
+		key := d.Format("2006-01-02")
+		if _, ok := have[key]; !ok {
+			out = append(out, key)
+		}
+	}
+	return out
+}
+
 // PeriodSpan 某个周期在本地库里的起止。
 type PeriodSpan struct {
 	Period string `json:"period"`
 	Bars   int    `json:"bars"`
 	First  string `json:"first"`
 	Last   string `json:"last"`
+	Days   int    `json:"days"` // 覆盖了多少天（比「根数」更能说明同步到什么程度）
 }
 
-// VarietySpan 一个标的（主连或某个月份合约）各周期的补全情况。
+// ContractSpan 一个月份合约（非主连）的本地覆盖情况。
+type ContractSpan struct {
+	Symbol  string `json:"symbol"`  // JM2601
+	Label   string `json:"label"`   // 2601（页面展示用）
+	Periods int    `json:"periods"` // 有几个周期有数据
+	Days    int    `json:"days"`    // 覆盖天数（取各周期里最多的那个）
+}
+
+// VarietySpan 一个品种各周期的补全情况。
 type VarietySpan struct {
-	Prefix  string       `json:"prefix"`
-	Name    string       `json:"name"`
-	Symbol  string       `json:"symbol"`
-	Kind    string       `json:"kind"`  // main（主连）| month（月份）
-	Label   string       `json:"label"` // 主连 / 2701
-	Periods []PeriodSpan `json:"periods"`
+	Prefix    string         `json:"prefix"`
+	Name      string         `json:"name"`
+	Symbol    string         `json:"symbol"`
+	Periods   []PeriodSpan   `json:"periods"`
+	Contracts []ContractSpan `json:"contracts"` // 该品种已同步的月份合约（不含主连）
 }
 
-// LocalCoverage 全市场标的的本地覆盖：主连和每个月份合约各占一行，都能单独补全。
-//
-// months 是「品种 → 在交易的全部月份合约」（由 futures.ContractCache 提供），
-// 传 nil 就只列本地已经有数据的月份合约；没数据的品种照样列出，方便看到还没补上的。
-func LocalCoverage(st *store.Store, months map[string][]string) ([]VarietySpan, error) {
+// LocalCoverage 全市场品种的本地覆盖。没有数据的品种也会列出，方便看到还没补上的。
+func LocalCoverage(st *store.Store) ([]VarietySpan, error) {
 	if st == nil {
 		return nil, fmt.Errorf("缺少本地存储")
 	}
@@ -644,66 +783,48 @@ func LocalCoverage(st *store.Store, months map[string][]string) ([]VarietySpan, 
 	for _, c := range cov {
 		bySymbol[c.Symbol] = append(bySymbol[c.Symbol], c)
 	}
-	// 本地已经存过的月份合约，按品种归堆
-	stored := map[string][]string{}
-	for sym := range bySymbol {
-		if futures.IsMainSymbol(sym) {
-			continue
-		}
-		v, ok := futures.VarietyOfSymbol(sym)
-		if !ok {
-			continue
-		}
-		stored[v.Prefix] = append(stored[v.Prefix], sym)
-	}
-	out := make([]VarietySpan, 0, len(futures.ListVarieties())*2)
+	// 每个组合覆盖了多少天：一次查完（页面每 2 秒轮询，不能逐品种问）
+	dayCounts, _ := st.FuturesCoverageDayCounts()
+	out := make([]VarietySpan, 0, len(futures.ListVarieties()))
 	for _, v := range futures.ListVarieties() {
-		out = append(out, spanOf(v, futures.MainSymbol(v), bySymbol))
-		list := append([]string(nil), stored[v.Prefix]...)
-		// 在交易的月份合约：哪怕本地一根都没有也要全列出来，否则没法从零开始补
-		for _, m := range months[strings.ToUpper(v.Prefix)] {
-			m = strings.ToUpper(strings.TrimSpace(m))
-			if m == "" || futures.SymbolKind(m) != "month" || containsSym(list, m) {
+		symbol := futures.MainSymbol(v)
+		item := VarietySpan{
+			Prefix: v.Prefix, Name: v.Name, Symbol: symbol,
+			Periods: []PeriodSpan{}, Contracts: []ContractSpan{},
+		}
+		// 该品种的月份合约（JM2601 之类）：页面要在「主连」之外区分它们
+		for other, rows := range bySymbol {
+			if strings.EqualFold(other, symbol) {
 				continue
 			}
-			if mv, ok := futures.VarietyOfSymbol(m); ok && strings.EqualFold(mv.Prefix, v.Prefix) {
-				list = append(list, m)
+			owner, ok := futures.VarietyOfSymbol(other)
+			if !ok || !strings.EqualFold(owner.Prefix, v.Prefix) {
+				continue
 			}
+			span := ContractSpan{Symbol: other, Periods: len(rows)}
+			span.Label = strings.TrimPrefix(strings.ToUpper(other), strings.ToUpper(v.Prefix))
+			for _, r := range rows {
+				if d := dayCounts[other+"|"+r.Period]; d > span.Days {
+					span.Days = d
+				}
+			}
+			item.Contracts = append(item.Contracts, span)
 		}
-		sort.Sort(sort.Reverse(sort.StringSlice(list))) // 远月在前
-		for _, sym := range list {
-			out = append(out, spanOf(v, sym, bySymbol))
+		sort.Slice(item.Contracts, func(i, j int) bool { return item.Contracts[i].Symbol < item.Contracts[j].Symbol })
+		rows := bySymbol[symbol]
+		sort.Slice(rows, func(i, j int) bool { return periodOrder(rows[i].Period) < periodOrder(rows[j].Period) })
+		for _, row := range rows {
+			item.Periods = append(item.Periods, PeriodSpan{
+				Period: row.Period,
+				Bars:   row.Bars,
+				First:  formatBarTime(row.Period, row.First),
+				Last:   formatBarTime(row.Period, row.Last),
+				Days:   dayCounts[row.Symbol+"|"+row.Period],
+			})
 		}
+		out = append(out, item)
 	}
 	return out, nil
-}
-
-func spanOf(v futures.Variety, symbol string, bySymbol map[string][]store.FuturesCoverage) VarietySpan {
-	item := VarietySpan{
-		Prefix: v.Prefix, Name: v.Name, Symbol: symbol,
-		Kind: futures.SymbolKind(symbol), Label: futures.SymbolLabel(symbol),
-		Periods: []PeriodSpan{},
-	}
-	rows := bySymbol[symbol]
-	sort.Slice(rows, func(i, j int) bool { return periodOrder(rows[i].Period) < periodOrder(rows[j].Period) })
-	for _, row := range rows {
-		item.Periods = append(item.Periods, PeriodSpan{
-			Period: row.Period,
-			Bars:   row.Bars,
-			First:  formatBarTime(row.Period, row.First),
-			Last:   formatBarTime(row.Period, row.Last),
-		})
-	}
-	return item
-}
-
-func containsSym(list []string, sym string) bool {
-	for _, s := range list {
-		if strings.EqualFold(s, sym) {
-			return true
-		}
-	}
-	return false
 }
 
 func periodOrder(period string) int {

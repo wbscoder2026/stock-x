@@ -93,16 +93,57 @@ export type FuturesLocalPeriod = {
   bars: number
   first: string
   last: string
+  days?: number // 覆盖了多少天（判断同步到什么程度比「根数」直观）
 }
 
-// 一行 = 一个标的：主连（kind=main，如 JM0）或某个月份合约（kind=month，如 JM2701）
 export type FuturesLocalVariety = {
   prefix: string
   name: string
   symbol: string
-  kind: string // main | month
-  label: string // 主连 / 2701
   periods: FuturesLocalPeriod[]
+  contracts?: FuturesContractSpan[] // 该品种已同步的月份合约（不含主连）
+}
+
+export type FuturesContractSpan = {
+  symbol: string // JM2601
+  label: string // 2601
+  periods: number
+  days: number
+}
+
+export type FuturesMonthGroup = {
+  month: string // 2026-09
+  days: number
+  bars: number
+  missing?: string[]
+}
+
+export type FuturesLocalDetail = {
+  prefix: string
+  name: string
+  symbol: string
+  minute_synced: boolean // 有没有 1 分钟级别的数据
+  minute_days: number // 1 分钟覆盖了多少天
+  minute_first: string
+  minute_last: string
+  periods: FuturesPeriodDetail[]
+}
+
+export type FuturesPeriodDetail = {
+  period: string
+  is_minute: boolean
+  bars: number
+  first: string
+  last: string
+  days: FuturesDayDetail[]
+  months: FuturesMonthGroup[] // 二级分类：月份 → 日期
+  missing?: string[] // 首末之间工作日却没数据的日期（可能是节假日）
+}
+
+export type FuturesDayDetail = {
+  day: string
+  bars: number
+  weekday: string
 }
 
 export type FuturesBackfillStatus = {
@@ -111,9 +152,6 @@ export type FuturesBackfillStatus = {
   mode: string
   prefix: string
   name: string
-  symbol: string // 正在补的合约代码
-  kind: string // main | month
-  label: string // 主连 / 2701
   period: string
   from: string
   to: string
@@ -121,9 +159,13 @@ export type FuturesBackfillStatus = {
   saved: number
   message: string
   queued: number
-  done: number // 本批已完成的标的数
-  total: number // 本批标的总数（0 = 不是批量任务）
-  percent: number // 当前标的进度 0~100
+  done?: number // 当前品种已翻页数
+  total?: number // 当前品种计划翻页数
+  round_idx?: number // 本轮第几个品种
+  round_all?: number // 本轮共几个品种
+  percent?: number // 0~100
+  started_at?: number
+  elapsed_sec?: number
 }
 
 export type FuturesMemoryView = {
@@ -139,31 +181,31 @@ export type FuturesLocalReport = {
   memory: FuturesMemoryView
 }
 
-export type FuturesNewsItem = {
-  id: string
-  title: string
-  summary: string
-  url: string
-  media: string
-  provider: string
-  published: string
-  ts: number
-  tags?: string[]
-}
-
-export type FuturesNewsSource = {
+export type FuturesVarietyContracts = {
+  prefix: string
   name: string
-  ok: boolean
-  error?: string
-  count: number
+  exchange: string
+  main_symbol: string // 主连代码（RB0）
+  contracts: FuturesContract[] // 主连 + 各月份合约
+  error?: string // 这个品种取合约失败（页面仍显示主连）
 }
 
-export type FuturesNewsReport = {
-  items: FuturesNewsItem[]
-  sources: FuturesNewsSource[]
-  updated: string
-  count: number
-  interval?: string
+export type FuturesQuote = {
+  symbol: string
+  name: string
+  price: number
+  hold: number // 持仓量
+  volume: number
+  bid?: number // 买一价
+  ask?: number // 卖一价
+  bid_vol?: number // 买一量
+  ask_vol?: number // 卖一量
+  source?: string // hq（实时口，有盘口）| kline（退回分钟线，无盘口）
+  time: string
+  prev_close: number
+  change_pct: number
+  stale?: boolean // true = 这次没取到，用的是上一次的价
+  error?: string
 }
 
 export type FuturesContract = {
@@ -235,6 +277,8 @@ export type FuturesParams = {
   vol_ratio?: number
   hold_bars?: number
   stop_atr?: number
+  stop_mode?: string // atr | prev_low
+  stop_points?: number
   no_overnight?: boolean
   from?: string
   to?: string
@@ -283,6 +327,8 @@ export type FuturesWatchEvent = {
   tp_price: number
   rr: number
   stop_atr: number
+  stop_mode?: string
+  stop_points?: number
   tick_size: number
 }
 
@@ -324,6 +370,8 @@ export type FuturesOutcome = FuturesEvent & {
   tp_price: number
   r_multiple: number
   stop_atr: number
+  stop_mode?: string
+  stop_points?: number
   tick_size: number
 }
 
@@ -339,6 +387,8 @@ export type FuturesSweepRequest = {
   vol_ratio?: number[]
   hold_bars?: number[]
   stop_atr?: number[]
+  stop_modes?: string[]
+  stop_points?: number[]
   no_overnight?: number[]
   from?: string
   to?: string
@@ -439,6 +489,33 @@ export type FuturesFavoriteInput = {
   origin_avg_r?: number
   origin_profit_factor?: number
   origin_trades?: number
+}
+
+export type FuturesNewsItem = {
+  id: string
+  title: string
+  summary: string
+  url: string
+  media: string
+  provider: string
+  published: string
+  ts: number
+  tags?: string[]
+}
+
+export type FuturesNewsSourceStatus = {
+  name: string
+  ok: boolean
+  error?: string
+  count: number
+}
+
+export type FuturesNewsReport = {
+  items: FuturesNewsItem[]
+  sources: FuturesNewsSourceStatus[]
+  updated: string
+  count: number
+  interval?: string
 }
 
 export type FuturesSymbolStat = {
