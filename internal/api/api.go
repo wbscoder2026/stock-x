@@ -49,8 +49,9 @@ func New(st *store.Store, jobs *job.Manager, sched *job.Scheduler, cfg config.Co
 		Bars:  futuresync.NewStoredSource(st, futures.NewMultiSource(futures.DefaultSources()...)),
 	}
 	if cfg.FuturesNews {
-		names := strings.Split(cfg.FuturesNewsSources, ",")
-		srv.News = futures.NewNewsHub(futures.NewsSourcesByName(names, cfg.FuturesNewsColumn)...)
+		names := splitCSV(cfg.FuturesNewsSources)
+		keywords := splitCSV(cfg.FuturesNewsKeywords)
+		srv.News = futures.NewNewsHub(futures.NewsSourcesByName(names, cfg.FuturesNewsColumn, keywords)...)
 	}
 	srv.Backfill = futuresync.NewBackfiller(st, srv.Bars.Cache, srv.Bars.Live)
 	srv.Watch.OnEvents = srv.pushFuturesAlerts // 系统级提醒：飞书 / 本机通知

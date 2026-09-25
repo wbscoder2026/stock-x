@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -403,20 +404,299 @@ func TestNewsHubWithoutSources(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------- 行业/企业源
+
+// 生意社列表项：分类 + 标题链接 + 时间，按真实结构构造
+const pppiFixture = `<div class="list-c"><ul style="clear:both">
+<li>[<a href="https://www.100ppi.com/news/list-12-12-1.html" class="blueq">国内</a>]        <a href="https://www.100ppi.com/news/detail-20260925-6272965.html" target="_blank" class="blueq">生意社：焦煤供给持续收紧 焦炭市场价格偏强运行</a>
+        <span>2026-09-25 18:11</span></li>
+<li>[<a href="https://www.100ppi.com/news/list-1211-1211-1.html" class="blueq">企业</a>]        <a href="https://www.100ppi.com/news/detail-20260924-6271000.html" target="_blank" class="blueq">山西焦煤：子公司煤矿复产 <em>公告</em></a>
+        <span>2026-09-24 09:05</span></li>
+</ul></div>`
+
+func TestParsePPPI(t *testing.T) {
+	got := parsePPPI([]byte(pppiFixture))
+	if len(got) != 2 {
+		t.Fatalf("应解析出 2 条：%d", len(got))
+	}
+	first := got[0]
+	if first.ID != "20260925-6272965" {
+		t.Fatalf("id 应从详情链接里取：%q", first.ID)
+	}
+	if first.Provider != "100ppi" || first.Media != "国内" {
+		t.Fatalf("来源/分类不对：%+v", first)
+	}
+	if first.Title != "生意社：焦煤供给持续收紧 焦炭市场价格偏强运行" {
+		t.Fatalf("标题不对：%q", first.Title)
+	}
+	if first.URL != "https://www.100ppi.com/news/detail-20260925-6272965.html" {
+		t.Fatalf("链接不对：%q", first.URL)
+	}
+	if first.Published != "2026-09-25 18:11" || first.TS == 0 {
+		t.Fatalf("时间不对：%s %d", first.Published, first.TS)
+	}
+	// 标题里的 <em> 要剥掉
+	if got[1].Title != "山西焦煤：子公司煤矿复产 公告" {
+		t.Fatalf("HTML 没剥干净：%q", got[1].Title)
+	}
+}
+
+func TestParsePPPISkipsBadRows(t *testing.T) {
+	// 没有时间的行不该被当成新闻收下
+	body := []byte(`<li>[<a href="/a" class="blueq">国内</a>] <a href="https://www.100ppi.com/news/detail-20260925-1.html">无时间</a></li>`)
+	if got := parsePPPI(body); len(got) != 0 {
+		t.Fatalf("结构不完整的不该收：%+v", got)
+	}
+}
+
+// 「均差/均线」是生意社的算法排名贴（一个品种一天一条），不是新闻，要丢掉
+func TestParsePPPIskipsAlgorithmPosts(t *testing.T) {
+	body := []byte(`<ul>
+<li>[<a href="/a" class="blueq">均差</a>] <a href="https://www.100ppi.com/news/detail-20260925-1.html">生意社焦煤9月25日均差为12.00元/吨 由正向缩小重新扩大</a><span>2026-09-25 18:11</span></li>
+<li>[<a href="/a" class="blueq">国内</a>] <a href="https://www.100ppi.com/news/detail-20260925-2.html">生意社焦煤9月25日均线下穿</a><span>2026-09-25 18:11</span></li>
+<li>[<a href="/a" class="blueq">企业</a>] <a href="https://www.100ppi.com/news/detail-20260925-3.html">生意社：焦煤供给持续收紧 焦炭市场价格偏强运行</a><span>2026-09-25 18:11</span></li>
+</ul>`)
+	got := parsePPPI(body)
+	if len(got) != 1 {
+		t.Fatalf("只该留下正经那条：%+v", got)
+	}
+	if strings.Contains(got[0].Title, "均") {
+		t.Fatalf("算法贴没滤掉：%q", got[0].Title)
+	}
+}
+
+func TestPPPISourceEndToEnd(t *testing.T) {
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		_, _ = w.Write([]byte(pppiFixture))
+	}))
+	t.Cleanup(srv.Close)
+	// URL 模板里带 %s（栏目号）；Pages 置空，避免测试打到真实站点
+	src := &PPPISource{URL: srv.URL + "/news/list--%s-1.html", Pages: []string{}}
+	items, err := src.Fetch(context.Background(), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 两个栏目都返回同一份 fixture（同两个 id），按 id 去重后只剩 2 条
+	if len(items) != 2 {
+		t.Fatalf("同一篇出现在多个栏目应只算一条：%d", len(items))
+	}
+	if len(paths) != 2 || paths[0] != "/news/list--12-1.html" || paths[1] != "/news/list--1211-1.html" {
+		t.Fatalf("应抓「国内」和「企业」两个栏目：%v", paths)
+	}
+}
+
+// 一个栏目挂了不该让整个源失败
+func TestPPPISourceToleratesOneBadCategory(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "--1211-") {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		_, _ = w.Write([]byte(pppiFixture))
+	}))
+	t.Cleanup(srv.Close)
+	src := &PPPISource{URL: srv.URL + "/news/list--%s-1.html", Pages: []string{}}
+	items, err := src.Fetch(context.Background(), 100)
+	if err != nil || len(items) == 0 {
+		t.Fatalf("一个栏目挂了仍应返回另一个栏目的新闻：%d %v", len(items), err)
+	}
+}
+
+// 产业子站：只有日期、没有分钟，时间戳按当天 00:00 算，展示也只显示日期
+func TestParsePPPIIndustry(t *testing.T) {
+	body := []byte(`<li class="black_li height_24p">[<a href="/news/">商品动态</a>]
+<a href="https://www.100ppi.com/news/detail-20260924-6265749.html" target="_blank">生意社：9月24日宜春市场冶金焦价格暂稳运行</a></li>
+<li class="black_li"><a href="https://www.100ppi.com/news/detail-20260924-6265749.html" target="_blank">同一条重复出现</a></li>
+<li class="black_li"><a href="https://www.100ppi.com/news/detail-20260925-6271428.html" target="_blank">生意社焦炭9月25日均差为12.00元/吨</a></li>`)
+	got := parsePPPIIndustry(body)
+	if len(got) != 1 {
+		t.Fatalf("应只留 1 条（去重 + 去掉算法贴）：%+v", got)
+	}
+	it := got[0]
+	if it.ID != "20260924-6265749" || it.Provider != "100ppi" || it.Media != "生意社" {
+		t.Fatalf("字段不对：%+v", it)
+	}
+	if it.Published != "2026-09-24" {
+		t.Fatalf("只该给到日期：%q", it.Published)
+	}
+	if it.TS != parseNewsTime("2026-09-24") {
+		t.Fatalf("时间戳应按当天算：%d", it.TS)
+	}
+}
+
+// 同一篇文章同时出现在栏目列表（带时间）和子站首页（只有日期）时，只留带时间的那份
+func TestPPPISourcePrefersTimedDuplicate(t *testing.T) {
+	industry := `<a href="https://www.100ppi.com/news/detail-20260925-6272965.html" target="_blank">生意社：焦煤供给持续收紧</a>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/industry") {
+			_, _ = w.Write([]byte(industry))
+			return
+		}
+		_, _ = w.Write([]byte(pppiFixture))
+	}))
+	t.Cleanup(srv.Close)
+	src := &PPPISource{
+		URL:   srv.URL + "/news/list--%s-1.html",
+		Pages: []string{srv.URL + "/industry"},
+	}
+	items, err := src.Fetch(context.Background(), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]NewsItem{}
+	for _, it := range items {
+		seen[it.ID] = it
+	}
+	if len(items) != len(seen) {
+		t.Fatalf("同 id 不该出现两次：%+v", items)
+	}
+	// 子站那条只有日期，不该把栏目列表里的同一条（带时间）挤掉
+	if got, ok := seen["20260925-6272965"]; !ok || got.Published != "2026-09-25 18:11" {
+		t.Fatalf("重复时应留带时间的那份：%+v", got)
+	}
+}
+
+// 东财关键词检索：JSONP + cmsArticleWebOld
+const emSearchFixture = `cb({"code":0,"msg":"OK","hitsTotal":2542,"result":{"cmsArticleWebOld":[
+{"date":"2026-09-24 19:50:05","code":"202609243883852788","title":"焦煤：淮北矿业拟转让煤炭产能置换指标","content":"淮北矿业公告，拟将153.528万吨/年煤炭产能置换指标以公开挂牌方式转让。","mediaName":"东方财富研究中心","url":"http://futures.eastmoney.com/a/202609243883852788.html"},
+{"date":"2026-09-24 17:00:00","code":"202609243883755084","title":"5.47亿元主力资金今日抢筹煤炭板块","content":"主力资金流量（万元）","mediaName":"证券时报网","url":"http://finance.eastmoney.com/a/202609243883755084.html"}
+]}})`
+
+func TestParseEMSearch(t *testing.T) {
+	got, err := parseEMSearch([]byte(emSearchFixture))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("应解析出 2 条：%d", len(got))
+	}
+	it := got[0]
+	if it.ID != "202609243883852788" || it.Provider != "emsearch" {
+		t.Fatalf("字段不对：%+v", it)
+	}
+	if it.Media != "东方财富研究中心" {
+		t.Fatalf("媒体不对：%q", it.Media)
+	}
+	if it.Published != "2026-09-24 19:50:05" || it.TS == 0 {
+		t.Fatalf("时间不对：%s %d", it.Published, it.TS)
+	}
+	if it.Summary == "" || !strings.Contains(it.Summary, "产能置换") {
+		t.Fatalf("正文应作为摘要：%q", it.Summary)
+	}
+}
+
+func TestEMSearchSourceUsesEveryKeyword(t *testing.T) {
+	var params []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		params = append(params, r.URL.Query().Get("param"))
+		_, _ = w.Write([]byte(emSearchFixture))
+	}))
+	t.Cleanup(srv.Close)
+	src := &EastmoneySearchSource{URL: srv.URL, Keywords: []string{"焦煤", "煤矿"}, PerPage: 10}
+	items, err := src.Fetch(context.Background(), 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(params) != 2 {
+		t.Fatalf("每个关键词各请求一次：%d", len(params))
+	}
+	if !strings.Contains(params[0], "焦煤") || !strings.Contains(params[1], "煤矿") {
+		t.Fatalf("关键词没发出去：%v", params)
+	}
+	// fixture 里只有一条标题带「焦煤」；「煤矿」一条都没有 → 回筛后只剩 1 条
+	if len(items) != 1 || !strings.Contains(items[0].Title, "焦煤") {
+		t.Fatalf("应按关键词回筛：%+v", items)
+	}
+}
+
+func TestEMSearchSourceWithoutKeywords(t *testing.T) {
+	src := NewEastmoneySearchSource(nil)
+	if _, err := src.Fetch(context.Background(), 10); err == nil {
+		t.Fatal("没配关键词应报错")
+	}
+}
+
+// 东财检索命中少时会兜底返回不相关结果，要按关键词回筛
+func TestEMSearchDropsIrrelevantFallback(t *testing.T) {
+	const fixture = `cb({"code":0,"result":{"cmsArticleWebOld":[
+{"date":"2026-09-25 09:00:00","code":"1","title":"焦煤主力合约收跌0.46%","content":"焦煤夜盘走弱","mediaName":"南方财经网","url":"u1"},
+{"date":"2026-09-25 08:00:00","code":"2","title":"某医疗公司完成D轮融资","content":"疫苗研发","mediaName":"财联社","url":"u2"},
+{"date":"2026-09-25 07:00:00","code":"3","title":"5.47亿元主力资金抢筹煤炭板块","content":"000983 山西焦煤 领涨","mediaName":"证券时报网","url":"u3"}
+]}})`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(fixture))
+	}))
+	t.Cleanup(srv.Close)
+	src := &EastmoneySearchSource{URL: srv.URL, Keywords: []string{"焦煤"}, PerPage: 10}
+	items, err := src.Fetch(context.Background(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 第 2 条标题和正文都没有「焦煤」→ 丢掉；第 3 条正文里有 → 留下
+	if len(items) != 2 {
+		t.Fatalf("不相关的兜底结果应被筛掉：%+v", items)
+	}
+	for _, it := range items {
+		if it.ID == "2" {
+			t.Fatalf("医疗新闻不该留下：%+v", it)
+		}
+	}
+}
+
+// 关键词全都查不到内容时应该报错，而不是返回空
+func TestEMSearchAllKeywordsIrrelevant(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(emSearchFixture)) // 里面没有「焦炭」
+	}))
+	t.Cleanup(srv.Close)
+	src := &EastmoneySearchSource{URL: srv.URL, Keywords: []string{"焦炭"}, PerPage: 10}
+	if _, err := src.Fetch(context.Background(), 10); err == nil {
+		t.Fatal("一条都不相关时应报错")
+	}
+}
+
+// 产业侧消息：标题里只有品种名 + 产业词，没有涨跌，也要认得出来
+func TestIsFuturesRelatedPicksIndustryNews(t *testing.T) {
+	yes := []string{
+		"山西焦煤：子公司煤矿复产",
+		"吕梁一座焦煤煤矿因任务完成停产",
+		"焦炭第四轮提涨落地，钢厂接受度提高",
+		"北方港口焦煤库存回升",
+	}
+	for _, s := range yes {
+		if !IsFuturesRelated(s, "") {
+			t.Fatalf("产业消息应判为相关：%s", s)
+		}
+	}
+}
+
 func TestNewsSourcesByName(t *testing.T) {
-	got := NewsSourcesByName([]string{"eastmoney", "sina", "unknown"}, "102")
+	got := NewsSourcesByName([]string{"eastmoney", "sina", "unknown"}, "102", nil)
 	if len(got) != 2 {
 		t.Fatalf("认不出的名字应跳过：%d", len(got))
 	}
-	if len(NewsSourcesByName(nil, "")) != 0 {
+	if len(NewsSourcesByName(nil, "", nil)) != 0 {
 		t.Fatal("空列表应返回空")
 	}
 	// 快讯栏目号要传下去
-	if src := NewsSourcesByName([]string{"eastmoney"}, "999")[0].(*EastmoneyFlashSource); src.Column != "999" {
+	if src := NewsSourcesByName([]string{"eastmoney"}, "999", nil)[0].(*EastmoneyFlashSource); src.Column != "999" {
 		t.Fatalf("栏目号没传下去：%s", src.Column)
 	}
-	if src := NewsSourcesByName([]string{"emnews"}, "999")[0].(*EastmoneyNewsSource); src.Column != "347" {
+	if src := NewsSourcesByName([]string{"emnews"}, "999", nil)[0].(*EastmoneyNewsSource); src.Column != "347" {
 		t.Fatalf("长资讯用的是另一套栏目号：%s", src.Column)
+	}
+	// 新增的行业/检索源
+	if src := NewsSourcesByName([]string{"100ppi"}, "", nil)[0]; src.Name() != "100ppi" || src.FuturesScoped() {
+		t.Fatalf("生意社源不对：%s scoped=%v", src.Name(), src.FuturesScoped())
+	}
+	search := NewsSourcesByName([]string{"emsearch"}, "", []string{"焦煤", "煤矿"})[0].(*EastmoneySearchSource)
+	if len(search.Keywords) != 2 || search.Keywords[0] != "焦煤" {
+		t.Fatalf("关键词没传下去：%v", search.Keywords)
+	}
+	if !search.FuturesScoped() {
+		t.Fatal("关键词检索的结果不该再按通用规则过滤")
 	}
 }
 

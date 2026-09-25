@@ -478,7 +478,9 @@ func firstNonEmpty(vals ...string) string {
 
 // NewsSourcesByName 按名字建新闻源（给 config.FuturesNewsSources 用）。
 // 认不出的名字直接跳过，这样填错了也只是少一个源，不会整个起不来。
-func NewsSourcesByName(names []string, emColumn string) []NewsSource {
+//
+// emColumn 是东财快讯的 fastColumn；keywords 只给「按关键词检索」的源用。
+func NewsSourcesByName(names []string, emColumn string, keywords []string) []NewsSource {
 	out := make([]NewsSource, 0, len(names))
 	for _, raw := range names {
 		switch strings.ToLower(strings.TrimSpace(raw)) {
@@ -489,6 +491,10 @@ func NewsSourcesByName(names []string, emColumn string) []NewsSource {
 			out = append(out, NewEastmoneyNewsSource(""))
 		case "sina":
 			out = append(out, NewSinaFlashSource())
+		case "100ppi", "ppi":
+			out = append(out, NewPPPISource())
+		case "emsearch", "search":
+			out = append(out, NewEastmoneySearchSource(keywords))
 		}
 	}
 	return out

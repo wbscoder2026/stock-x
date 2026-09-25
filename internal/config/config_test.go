@@ -35,8 +35,11 @@ func TestLoadFuturesNewsDefaults(t *testing.T) {
 	if cfg.FuturesNewsEvery != 5*time.Minute {
 		t.Fatalf("every=%v", cfg.FuturesNewsEvery)
 	}
-	if cfg.FuturesNewsSources != "eastmoney,sina" {
+	if cfg.FuturesNewsSources != "eastmoney,sina,100ppi,emsearch" {
 		t.Fatalf("sources=%q", cfg.FuturesNewsSources)
+	}
+	if cfg.FuturesNewsKeywords != "焦煤,焦炭,煤炭,铁矿石,螺纹钢,原油" {
+		t.Fatalf("keywords=%q", cfg.FuturesNewsKeywords)
 	}
 	if cfg.FuturesNewsLimit != 200 {
 		t.Fatalf("limit=%d", cfg.FuturesNewsLimit)
@@ -50,6 +53,7 @@ func TestLoadFuturesNewsOverrides(t *testing.T) {
 	t.Setenv("FUTURES_NEWS", "0")
 	t.Setenv("FUTURES_NEWS_EVERY", "10m")
 	t.Setenv("FUTURES_NEWS_SOURCES", "sina")
+	t.Setenv("FUTURES_NEWS_KEYWORDS", "铜,铝")
 	t.Setenv("FUTURES_NEWS_LIMIT", "50")
 	t.Setenv("FUTURES_NEWS_EM_COLUMN", "347")
 	cfg := Load()
@@ -57,6 +61,7 @@ func TestLoadFuturesNewsOverrides(t *testing.T) {
 		t.Fatal("FUTURES_NEWS=0 应关闭")
 	}
 	if cfg.FuturesNewsEvery != 10*time.Minute || cfg.FuturesNewsSources != "sina" ||
+		cfg.FuturesNewsKeywords != "铜,铝" ||
 		cfg.FuturesNewsLimit != 50 || cfg.FuturesNewsColumn != "347" {
 		t.Fatalf("%+v", cfg)
 	}

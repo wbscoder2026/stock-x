@@ -19,6 +19,17 @@ const PROVIDER_LABEL: Record<string, string> = {
   sina: '新浪',
   eastmoney: '东财',
   emnews: '东财资讯',
+  '100ppi': '生意社',
+  emsearch: '关键词检索',
+}
+
+// 来源标签用不同颜色区分：快讯（红/橙）和行业/检索源（蓝/绿）一眼可分
+const PROVIDER_COLOR: Record<string, string> = {
+  sina: 'red',
+  eastmoney: 'orange',
+  emnews: 'gold',
+  '100ppi': 'blue',
+  emsearch: 'green',
 }
 
 function providerLabel(name: string) {
@@ -193,7 +204,7 @@ function NewsRow({ item, now }: { item: FuturesNewsItem; now: number }) {
             {ago(item.ts, now)}
           </Tag>
         ) : null}
-        <Tag color={item.provider === 'eastmoney' ? 'orange' : 'red'} style={{ marginInlineEnd: 0, fontSize: 11 }}>
+        <Tag color={PROVIDER_COLOR[item.provider] ?? 'default'} style={{ marginInlineEnd: 0, fontSize: 11 }}>
           {providerLabel(item.provider)}
         </Tag>
         {item.media ? (

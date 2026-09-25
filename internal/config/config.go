@@ -17,16 +17,17 @@ type Config struct {
 	CronSpec      string // 默认 15 19 * * 1-5
 	Workers       int    // 默认 4，上限见 syncer.maxWorkers
 	// 服务启动后在后台把期货 K 线增量写入本地库，并装进内存给扫描用。
-	FuturesSync        bool
-	FuturesSyncEvery   time.Duration
-	FuturesSyncPeriods string
-	FuturesSyncWorkers int
-	FuturesSyncDerive  bool          // 1 分钟够深时，其他分钟周期本地合成（不再各问上游要一遍）
-	FuturesNews        bool          // 后台定时抓期货新闻。0 = 关闭
-	FuturesNewsEvery   time.Duration // 抓取间隔
-	FuturesNewsSources string        // 新闻源，逗号分隔（sina / eastmoney）
-	FuturesNewsLimit   int           // 列表最多返回多少条
-	FuturesNewsColumn  string        // 东财快讯栏目号 fastColumn（默认 102 = 国际财经，含商品）
+	FuturesSync         bool
+	FuturesSyncEvery    time.Duration
+	FuturesSyncPeriods  string
+	FuturesSyncWorkers  int
+	FuturesSyncDerive   bool          // 1 分钟够深时，其他分钟周期本地合成（不再各问上游要一遍）
+	FuturesNews         bool          // 后台定时抓期货新闻。0 = 关闭
+	FuturesNewsEvery    time.Duration // 抓取间隔
+	FuturesNewsSources  string        // 新闻源，逗号分隔（eastmoney/sina/emnews/100ppi/emsearch）
+	FuturesNewsKeywords string        // 关键词检索类源用的词，逗号分隔（焦煤、煤矿…）
+	FuturesNewsLimit    int           // 列表最多返回多少条
+	FuturesNewsColumn   string        // 东财快讯栏目号 fastColumn（默认 102 = 国际财经，含商品）
 }
 
 // Load 读取环境变量；若存在 .env 则先填入尚未设置的键（不覆盖已有环境变量）。
@@ -39,22 +40,23 @@ func Load() Config {
 		}
 	}
 	return Config{
-		HTTPAddr:           getenv("HTTP_ADDR", ":8080"),
-		DBPath:             getenv("DB_PATH", "data/stock-x.db"),
-		StartDate:          getenv("START_DATE", "2024-01-01"),
-		FeishuWebhook:      strings.TrimSpace(os.Getenv("FEISHU_WEBHOOK_URL")),
-		CronSpec:           getenv("CRON_SPEC", "15 19 * * 1-5"),
-		Workers:            workers,
-		FuturesSync:        getenvBool("FUTURES_SYNC", true),
-		FuturesSyncEvery:   getenvDuration("FUTURES_SYNC_EVERY", 30*time.Minute),
-		FuturesSyncPeriods: getenv("FUTURES_SYNC_PERIODS", "1d,5,15,30,60,120"),
-		FuturesSyncWorkers: getenvInt("FUTURES_SYNC_WORKERS", 4),
-		FuturesSyncDerive:  getenvBool("FUTURES_SYNC_DERIVE", true),
-		FuturesNews:        getenvBool("FUTURES_NEWS", true),
-		FuturesNewsEvery:   getenvDuration("FUTURES_NEWS_EVERY", 5*time.Minute),
-		FuturesNewsSources: getenv("FUTURES_NEWS_SOURCES", "eastmoney,sina"),
-		FuturesNewsLimit:   getenvInt("FUTURES_NEWS_LIMIT", 200),
-		FuturesNewsColumn:  getenv("FUTURES_NEWS_EM_COLUMN", "102"),
+		HTTPAddr:            getenv("HTTP_ADDR", ":8080"),
+		DBPath:              getenv("DB_PATH", "data/stock-x.db"),
+		StartDate:           getenv("START_DATE", "2024-01-01"),
+		FeishuWebhook:       strings.TrimSpace(os.Getenv("FEISHU_WEBHOOK_URL")),
+		CronSpec:            getenv("CRON_SPEC", "15 19 * * 1-5"),
+		Workers:             workers,
+		FuturesSync:         getenvBool("FUTURES_SYNC", true),
+		FuturesSyncEvery:    getenvDuration("FUTURES_SYNC_EVERY", 30*time.Minute),
+		FuturesSyncPeriods:  getenv("FUTURES_SYNC_PERIODS", "1d,5,15,30,60,120"),
+		FuturesSyncWorkers:  getenvInt("FUTURES_SYNC_WORKERS", 4),
+		FuturesSyncDerive:   getenvBool("FUTURES_SYNC_DERIVE", true),
+		FuturesNews:         getenvBool("FUTURES_NEWS", true),
+		FuturesNewsEvery:    getenvDuration("FUTURES_NEWS_EVERY", 5*time.Minute),
+		FuturesNewsSources:  getenv("FUTURES_NEWS_SOURCES", "eastmoney,sina,100ppi,emsearch"),
+		FuturesNewsKeywords: getenv("FUTURES_NEWS_KEYWORDS", "焦煤,焦炭,煤炭,铁矿石,螺纹钢,原油"),
+		FuturesNewsLimit:    getenvInt("FUTURES_NEWS_LIMIT", 200),
+		FuturesNewsColumn:   getenv("FUTURES_NEWS_EM_COLUMN", "102"),
 	}
 }
 

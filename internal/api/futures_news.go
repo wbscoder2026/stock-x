@@ -5,11 +5,27 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/wbscoder2026/stock-x/internal/futures"
 	"github.com/wbscoder2026/stock-x/internal/store"
 )
+
+// splitCSV 逗号分隔的配置项 → 去空去重后的列表。
+func splitCSV(raw string) []string {
+	out := make([]string, 0, 4)
+	seen := map[string]bool{}
+	for _, part := range strings.Split(raw, ",") {
+		v := strings.TrimSpace(part)
+		if v == "" || seen[v] {
+			continue
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+	return out
+}
 
 // newsIntervalText 给页面用的间隔文案（页面直接拼在「每 … 自动抓一次」里）。
 // time.Duration.String() 出来是「5m0s」，读着别扭，整分整时就说人话。
