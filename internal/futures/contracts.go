@@ -109,6 +109,12 @@ type ContractResolver interface {
 	Resolve(ctx context.Context, v Variety) (symbol, label string, err error)
 }
 
+// ContractLister 列出某品种当前在交易的**全部**月份合约（JM → JM2611/JM2612/JM2701…）。
+// 主力只是其中一个，补全历史要把每个月份都补上。
+type ContractLister interface {
+	List(ctx context.Context, v Variety) ([]Contract, error)
+}
+
 // SinaContracts 用新浪行情中心的持仓量挑主力月份合约（持仓最大者）。
 type SinaContracts struct {
 	Client *Client
@@ -142,6 +148,27 @@ func (s *SinaContracts) Resolve(ctx context.Context, v Variety) (string, string,
 	return best.Symbol, best.Label, nil
 }
 
+// List 该品种在交易的全部月份合约，按合约代码升序（近月在前）。
+// 连续/主连代码（JM0）不算月份合约，会被剔除；一个都没有就报错。
+func (s *SinaContracts) List(ctx context.Context, v Variety) ([]Contract, error) {
+	list, err := s.Client.ContractsByPrefix(ctx, v.Prefix)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Contract, 0, len(list))
+	for _, c := range list {
+		if c.Symbol == "" || c.Kind == "main" || isMain(c.Symbol) {
+			continue
+		}
+		out = append(out, c)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("%s 没有月份合约", v.Prefix)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Symbol < out[j].Symbol })
+	return out, nil
+}
+
 func ListVarieties() []Variety {
 	out := make([]Variety, len(varieties))
 	copy(out, varieties)
@@ -150,6 +177,37 @@ func ListVarieties() []Variety {
 
 // MainSymbol 主力连续标的，如 JM → JM0。
 func MainSymbol(v Variety) string { return mainOf(v).Symbol }
+
+// IsMainSymbol 是否是主连代码（JM0）。月份合约（JM2701）返回 false。
+func IsMainSymbol(symbol string) bool { return isMain(symbol) }
+
+// SymbolKind 标的类别：main（主连）/ month（月份合约）。空代码返回空串。
+func SymbolKind(symbol string) string {
+	if strings.TrimSpace(symbol) == "" {
+		return ""
+	}
+	if IsMainSymbol(symbol) {
+		return "main"
+	}
+	return "month"
+}
+
+// SymbolLabel 展示用的短标签：主连代码 →「主连」，月份合约 →「2701」。
+func SymbolLabel(symbol string) string {
+	sym := strings.ToUpper(strings.TrimSpace(symbol))
+	if sym == "" {
+		return ""
+	}
+	if IsMainSymbol(sym) {
+		return "主连"
+	}
+	if v, ok := VarietyOfSymbol(sym); ok {
+		if rest := strings.TrimPrefix(sym, strings.ToUpper(v.Prefix)); rest != "" {
+			return rest
+		}
+	}
+	return sym
+}
 
 func (c *Client) ContractsByPrefix(ctx context.Context, prefix string) ([]Contract, error) {
 	v, ok := varietyByPrefix(prefix)

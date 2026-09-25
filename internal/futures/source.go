@@ -38,6 +38,17 @@ type MinuteRangeSource interface {
 	MinuteRange(ctx context.Context, v Variety, period string, end time.Time, limit int) ([]Bar, error)
 }
 
+// SymbolMinuteSource 能按「具体合约代码」取分钟线的源。
+// 品种口径（BarSource）只能拿主连，月份合约（JM2701）要走这一层。
+type SymbolMinuteSource interface {
+	MinuteSymbol(ctx context.Context, symbol, period string) ([]Bar, error)
+}
+
+// SymbolMinuteRangeSource 在 SymbolMinuteSource 之上还能按结束时间往前翻页（补全历史用）。
+type SymbolMinuteRangeSource interface {
+	MinuteRangeSymbol(ctx context.Context, symbol, period string, end time.Time, limit int) ([]Bar, error)
+}
+
 // ---------------------------------------------------------------- 多源容错
 
 // SourceStatus 各数据源健康度
@@ -229,6 +240,35 @@ func (m *MultiSource) MinuteRange(ctx context.Context, v Variety, period string,
 	})
 }
 
+// MinuteRangeSymbol 按具体合约代码往前翻分钟线：主连（JM0）与月份合约（JM2701）都走这里。
+// end 为零值表示最新一页；不支持翻页的源在指定 end 时会被跳过。
+func (m *MultiSource) MinuteRangeSymbol(ctx context.Context, symbol, period string, end time.Time, limit int) ([]Bar, error) {
+	v, _ := VarietyOfSymbol(symbol)
+	return fetch(m, v, func(src BarSource) ([]Bar, error) {
+		var bars []Bar
+		var err error
+		if rs, ok := src.(SymbolMinuteRangeSource); ok {
+			bars, err = rs.MinuteRangeSymbol(ctx, symbol, period, end, limit)
+		} else if !end.IsZero() {
+			return nil, errSourceNotApplicable
+		} else if ss, ok := src.(SymbolMinuteSource); ok {
+			bars, err = ss.MinuteSymbol(ctx, symbol, period)
+		} else {
+			return nil, errSourceNotApplicable
+		}
+		if err != nil {
+			return nil, err
+		}
+		if v.Prefix != "" {
+			// 脏数据（价格量级混叠）也算失败 → 自动降级到下一个源
+			if err := checkBarScale(v.Prefix, barCloses(bars)); err != nil {
+				return nil, err
+			}
+		}
+		return bars, nil
+	})
+}
+
 func (m *MultiSource) Minute(ctx context.Context, v Variety, period string) ([]Bar, error) {
 	return fetch(m, v, func(src BarSource) ([]Bar, error) {
 		bars, err := src.Minute(ctx, v, period)
@@ -320,6 +360,20 @@ func (s *SinaSource) Daily(ctx context.Context, v Variety) ([]Daily, error) {
 	return s.Client.Daily(ctx, mainOf(v).Symbol)
 }
 
+// MinuteSymbol 新浪按合约代码取分钟线：主连和月份合约都能取（接口本来就吃具体代码）。
+func (s *SinaSource) MinuteSymbol(ctx context.Context, symbol, period string) ([]Bar, error) {
+	return s.Client.Minute(ctx, symbol, period)
+}
+
+// MinuteRangeSymbol 新浪只给最新一段，没有按日期往前翻页的能力 → 指定 end 时报「不适用」，
+// 让 MultiSource 自动落到支持翻页的源（东财）上。
+func (s *SinaSource) MinuteRangeSymbol(ctx context.Context, symbol, period string, end time.Time, _ int) ([]Bar, error) {
+	if !end.IsZero() {
+		return nil, errSourceNotApplicable
+	}
+	return s.Client.Minute(ctx, symbol, period)
+}
+
 // ---------------------------------------------------------------- 东方财富
 
 const defaultEastmoneyURL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
@@ -357,7 +411,7 @@ func (e *EastmoneySource) Supports(v Variety) bool {
 	return ok
 }
 
-// eastmoneySecid 品种 → 东财 secid，如 JM → 114.jmm；不支持的品种返回 false。
+// eastmoneySecid 品种 → 东财主连 secid，如 JM → 114.jmm；不支持的品种返回 false。
 func eastmoneySecid(v Variety) (string, bool) {
 	market, ok := eastmoneyMarkets[v.Exchange]
 	if !ok {
@@ -368,6 +422,24 @@ func eastmoneySecid(v Variety) (string, bool) {
 		return "", false
 	}
 	return fmt.Sprintf("%d.%sm", market, code), true
+}
+
+// eastmoneySymbolSecid 合约代码 → 东财 secid：主连 JM0 → 114.jmm（沿用连续口径），
+// 月份合约 JM2701 → 114.jm2701。认不出来的代码返回 false。
+func eastmoneySymbolSecid(symbol string) (string, bool) {
+	sym := strings.ToUpper(strings.TrimSpace(symbol))
+	v, ok := VarietyOfSymbol(sym)
+	if !ok {
+		return "", false
+	}
+	if IsMainSymbol(sym) {
+		return eastmoneySecid(v)
+	}
+	market, ok := eastmoneyMarkets[v.Exchange]
+	if !ok {
+		return "", false
+	}
+	return fmt.Sprintf("%d.%s", market, strings.ToLower(sym)), true
 }
 
 func eastmoneyKlt(period string) (int, error) {
@@ -397,6 +469,20 @@ func (e *EastmoneySource) MinuteRange(ctx context.Context, v Variety, period str
 	if !ok {
 		return nil, fmt.Errorf("东财不支持 %s", v.Prefix)
 	}
+	return e.fetchMinute(ctx, secid, v.Prefix, period, end, limit)
+}
+
+// MinuteRangeSymbol 按合约代码取分钟线：月份合约（JM2701 → 114.jm2701）也能翻页补全。
+func (e *EastmoneySource) MinuteRangeSymbol(ctx context.Context, symbol, period string, end time.Time, limit int) ([]Bar, error) {
+	secid, ok := eastmoneySymbolSecid(symbol)
+	if !ok {
+		return nil, fmt.Errorf("东财不支持 %s", symbol)
+	}
+	return e.fetchMinute(ctx, secid, symbol, period, end, limit)
+}
+
+// fetchMinute 拉分钟线并解析。who 只用于报错文案。
+func (e *EastmoneySource) fetchMinute(ctx context.Context, secid, who, period string, end time.Time, limit int) ([]Bar, error) {
 	klt, err := eastmoneyKlt(period)
 	if err != nil {
 		return nil, err
@@ -434,7 +520,7 @@ func (e *EastmoneySource) MinuteRange(ctx context.Context, v Variety, period str
 		})
 	}
 	if len(out) == 0 {
-		return nil, fmt.Errorf("东财 %s 无数据", v.Prefix)
+		return nil, fmt.Errorf("东财 %s 无数据", who)
 	}
 	return out, nil
 }

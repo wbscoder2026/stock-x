@@ -10,6 +10,7 @@ import FuturesBacktestPage from './pages/FuturesBacktestPage'
 import FuturesWatchPage from './pages/FuturesWatchPage'
 import FuturesLocalPage from './pages/FuturesLocalPage'
 import FuturesFavoritesPage from './pages/FuturesFavoritesPage'
+import FuturesNewsPage from './pages/FuturesNewsPage'
 
 const items = [
   { key: '/picks', label: '选股' },
@@ -22,6 +23,7 @@ const items = [
   { key: '/futures/favorites', label: '期货收藏' },
   { key: '/futures/watch', label: '期货监控' },
   { key: '/futures/local', label: '本地期货' },
+  { key: '/futures/news', label: '期货新闻' },
 ]
 
 export default function App() {
@@ -62,6 +64,7 @@ export default function App() {
           <Route path="/futures/favorites" element={<FuturesFavoritesPage />} />
           <Route path="/futures/watch" element={<FuturesWatchPage />} />
           <Route path="/futures/local" element={<FuturesLocalPage />} />
+          <Route path="/futures/news" element={<FuturesNewsPage />} />
         </Routes>
       </Layout.Content>
     </Layout>

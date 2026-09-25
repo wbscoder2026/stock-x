@@ -17,6 +17,7 @@ import type {
   FuturesFavorite,
   FuturesFavoriteInput,
   FuturesLocalReport,
+  FuturesNewsReport,
   FuturesVariety,
   FuturesWatchAlert,
   FuturesWatchConfig,
@@ -173,8 +174,22 @@ export function fetchFuturesLocal() {
   return apiGet<FuturesLocalReport>('/api/futures/local')
 }
 
-export function postFuturesLocalBackfill(body: { prefix: string; from?: string; to?: string }) {
+// 补全：给 symbols/symbol 就按合约代码补（主连 JM0、月份 JM2701 都行）；
+// 只给 prefix 则按 kinds 补（默认主连 + 主力月份合约一起补）
+export function postFuturesLocalBackfill(body: {
+  prefix?: string
+  symbol?: string
+  symbols?: string[]
+  kinds?: string[]
+  from?: string
+  to?: string
+}) {
   return apiSend<FuturesBackfillStatus>('/api/futures/local/backfill', 'POST', body)
+}
+
+// 进度条专用：只回状态，不查覆盖表，可以高频轮询
+export function fetchFuturesLocalProgress() {
+  return apiGet<FuturesBackfillStatus>('/api/futures/local/progress')
 }
 
 export function pauseFuturesLocal() {
@@ -183,6 +198,14 @@ export function pauseFuturesLocal() {
 
 export function resumeFuturesLocal() {
   return apiSend<FuturesBackfillStatus>('/api/futures/local/resume', 'POST', {})
+}
+
+export function fetchFuturesNews(limit?: number) {
+  return apiGet<FuturesNewsReport>(`/api/futures/news${limit ? `?limit=${limit}` : ''}`)
+}
+
+export function refreshFuturesNews() {
+  return apiSend<FuturesNewsReport>('/api/futures/news/refresh', 'POST', {})
 }
 
 export function fetchFuturesFavorites() {

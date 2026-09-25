@@ -35,6 +35,7 @@ type Options struct {
 	Start      time.Time // 深挖到该日期就停（零值 = 只看页数）
 	MinuteBars int       // 分钟线单次窗口（默认 1000）
 	Cache      *BarCache // 非空时，写库成功后把增量并进内存
+	Derive     bool      // 本地 1 分钟够深时，其他分钟周期改本地合成（不再各问上游要一遍）
 	Progress   func(done, total int, msg string)
 }
 
@@ -232,7 +233,7 @@ func Sync(ctx context.Context, st *store.Store, sources []futures.BarSource, opt
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			fetched, saved, err := syncOne(ctx, st, pool, jb.v, jb.period, opts)
+			fetched, saved, derived, err := syncOne(ctx, st, pool, jb.v, jb.period, opts)
 
 			mu.Lock()
 			done++
@@ -242,7 +243,11 @@ func Sync(ctx context.Context, st *store.Store, sources []futures.BarSource, opt
 				stats.Failed = append(stats.Failed, fmt.Sprintf("%s/%s: %v", jb.v.Prefix, jb.period, err))
 			}
 			if opts.Progress != nil {
-				opts.Progress(done, len(jobs), fmt.Sprintf("%s %s（+%d 根）", jb.v.Prefix, jb.period, saved))
+				how := "网络"
+				if derived {
+					how = "本地合成"
+				}
+				opts.Progress(done, len(jobs), fmt.Sprintf("%s %s（%s +%d 根）", jb.v.Prefix, jb.period, how, saved))
 			}
 			mu.Unlock()
 		}(jb)
@@ -251,23 +256,25 @@ func Sync(ctx context.Context, st *store.Store, sources []futures.BarSource, opt
 	return stats, nil
 }
 
+// syncOne 同步一个品种的一个周期。derived=true 表示这一次是本地合成、没打接口。
 func syncOne(
 	ctx context.Context, st *store.Store, pool *sourcePool, v futures.Variety, period string, opts Options,
-) (fetched, saved int, err error) {
+) (fetched, saved int, derived bool, err error) {
 	symbol := futures.MainSymbol(v)
 	last, hasLast, err := st.FuturesLastTime(symbol, period)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, false, err
 	}
 
 	if period == DailyPeriod && opts.Deep {
-		return syncDailyDeep(ctx, st, pool, v, symbol, last, hasLast, opts)
+		fetched, saved, err = syncDailyDeep(ctx, st, pool, v, symbol, last, hasLast, opts)
+		return fetched, saved, false, err
 	}
 
 	if period == DailyPeriod {
 		days, err := fetchDaysPaged(ctx, pool, v, time.Time{}, 0)
 		if err != nil {
-			return 0, 0, err
+			return 0, 0, false, err
 		}
 		rows := rowsFromDays(symbol, days)
 		fetched = len(rows)
@@ -276,19 +283,25 @@ func syncOne(
 			savedRows = rowsAfter(rows, last)
 		}
 		if len(savedRows) == 0 {
-			return fetched, 0, nil
+			return fetched, 0, false, nil
 		}
 		n, err := st.UpsertFuturesBars(savedRows)
 		if err != nil {
-			return fetched, 0, err
+			return fetched, 0, false, err
 		}
 		touchCache(opts.Cache, symbol, DailyPeriod, rows, hasLast, savedRows)
-		return fetched, n, nil
+		return fetched, n, false, nil
+	}
+
+	// 本地 1 分钟已经挖到这个周期前面了 → 直接合成，省掉一次上游请求
+	if opts.Derive && shouldDerive(st, symbol, period) {
+		saved, derr := DerivePeriod(st, opts.Cache, symbol, period)
+		return 0, saved, true, derr
 	}
 
 	bars, err := fetchMinuteWindow(ctx, pool, v, period, opts.MinuteBars)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, false, err
 	}
 	rows := rowsFromBars(symbol, period, bars)
 	fetched = len(rows)
@@ -297,14 +310,14 @@ func syncOne(
 		savedRows = rowsAfter(rows, last)
 	}
 	if len(savedRows) == 0 {
-		return fetched, 0, nil
+		return fetched, 0, false, nil
 	}
 	n, err := st.UpsertFuturesBars(savedRows)
 	if err != nil {
-		return fetched, 0, err
+		return fetched, 0, false, err
 	}
 	touchCache(opts.Cache, symbol, period, rows, hasLast, savedRows)
-	return fetched, n, nil
+	return fetched, n, false, nil
 }
 
 // syncDailyDeep 从最新往前翻页挖日线历史：第一页只补新，后续页补更老的历史。

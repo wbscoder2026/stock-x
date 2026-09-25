@@ -27,6 +27,41 @@ func TestLoadFuturesSyncDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadFuturesNewsDefaults(t *testing.T) {
+	cfg := Load()
+	if !cfg.FuturesNews {
+		t.Fatal("新闻默认应开启")
+	}
+	if cfg.FuturesNewsEvery != 5*time.Minute {
+		t.Fatalf("every=%v", cfg.FuturesNewsEvery)
+	}
+	if cfg.FuturesNewsSources != "eastmoney,sina" {
+		t.Fatalf("sources=%q", cfg.FuturesNewsSources)
+	}
+	if cfg.FuturesNewsLimit != 200 {
+		t.Fatalf("limit=%d", cfg.FuturesNewsLimit)
+	}
+	if cfg.FuturesNewsColumn != "102" {
+		t.Fatalf("column=%q", cfg.FuturesNewsColumn)
+	}
+}
+
+func TestLoadFuturesNewsOverrides(t *testing.T) {
+	t.Setenv("FUTURES_NEWS", "0")
+	t.Setenv("FUTURES_NEWS_EVERY", "10m")
+	t.Setenv("FUTURES_NEWS_SOURCES", "sina")
+	t.Setenv("FUTURES_NEWS_LIMIT", "50")
+	t.Setenv("FUTURES_NEWS_EM_COLUMN", "347")
+	cfg := Load()
+	if cfg.FuturesNews {
+		t.Fatal("FUTURES_NEWS=0 应关闭")
+	}
+	if cfg.FuturesNewsEvery != 10*time.Minute || cfg.FuturesNewsSources != "sina" ||
+		cfg.FuturesNewsLimit != 50 || cfg.FuturesNewsColumn != "347" {
+		t.Fatalf("%+v", cfg)
+	}
+}
+
 func TestLoadFuturesSyncDisabled(t *testing.T) {
 	t.Setenv("FUTURES_SYNC", "0")
 	t.Setenv("FUTURES_SYNC_EVERY", "5m")

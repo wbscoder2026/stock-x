@@ -95,10 +95,13 @@ export type FuturesLocalPeriod = {
   last: string
 }
 
+// 一行 = 一个标的：主连（kind=main，如 JM0）或某个月份合约（kind=month，如 JM2701）
 export type FuturesLocalVariety = {
   prefix: string
   name: string
   symbol: string
+  kind: string // main | month
+  label: string // 主连 / 2701
   periods: FuturesLocalPeriod[]
 }
 
@@ -108,6 +111,9 @@ export type FuturesBackfillStatus = {
   mode: string
   prefix: string
   name: string
+  symbol: string // 正在补的合约代码
+  kind: string // main | month
+  label: string // 主连 / 2701
   period: string
   from: string
   to: string
@@ -115,6 +121,9 @@ export type FuturesBackfillStatus = {
   saved: number
   message: string
   queued: number
+  done: number // 本批已完成的标的数
+  total: number // 本批标的总数（0 = 不是批量任务）
+  percent: number // 当前标的进度 0~100
 }
 
 export type FuturesMemoryView = {
@@ -128,6 +137,33 @@ export type FuturesLocalReport = {
   items: FuturesLocalVariety[]
   backfill: FuturesBackfillStatus
   memory: FuturesMemoryView
+}
+
+export type FuturesNewsItem = {
+  id: string
+  title: string
+  summary: string
+  url: string
+  media: string
+  provider: string
+  published: string
+  ts: number
+  tags?: string[]
+}
+
+export type FuturesNewsSource = {
+  name: string
+  ok: boolean
+  error?: string
+  count: number
+}
+
+export type FuturesNewsReport = {
+  items: FuturesNewsItem[]
+  sources: FuturesNewsSource[]
+  updated: string
+  count: number
+  interval?: string
 }
 
 export type FuturesContract = {

@@ -118,7 +118,7 @@ func runFuturesSync(st *store.Store, deep bool) error {
 }
 
 func futuresSyncOptions(args []string, deep bool) (futuresync.Options, error) {
-	opts := futuresync.Options{Deep: deep}
+	opts := futuresync.Options{Deep: deep, Derive: true}
 	if deep {
 		opts.Pages = futuresync.DefaultPages
 	}
@@ -161,8 +161,15 @@ func futuresSyncOptions(args []string, deep bool) (futuresync.Options, error) {
 				return opts, fmt.Errorf("--bars 需为正整数：%s", value)
 			}
 			opts.MinuteBars = n
+		case "--derive":
+			switch strings.ToLower(strings.TrimSpace(value)) {
+			case "0", "false", "no", "off":
+				opts.Derive = false
+			default:
+				opts.Derive = true
+			}
 		default:
-			return opts, fmt.Errorf("未知参数 %s（可用 --periods --only --pages --start --workers --bars）", arg)
+			return opts, fmt.Errorf("未知参数 %s（可用 --periods --only --pages --start --workers --bars --derive）", arg)
 		}
 	}
 	return opts, nil
@@ -195,6 +202,7 @@ func warmFutures(ctx context.Context, bars *futuresync.StoredSource, cfg config.
 		Periods:  periods,
 		Workers:  workers,
 		Interval: cfg.FuturesSyncEvery,
+		Derive:   cfg.FuturesSyncDerive,
 		Progress: func(done, total int, msg string) {
 			if done == total || (done > 0 && done%50 == 0) {
 				log.Printf("期货同步 [%d/%d] %s", done, total, msg)
@@ -265,6 +273,11 @@ func runServe(cfg config.Config, st *store.Store, mgr *job.Manager) {
 	defer warmCancel()
 	if cfg.FuturesSync {
 		go warmFutures(warmCtx, srvAPI.Bars, cfg)
+	}
+	if srvAPI.News != nil && len(srvAPI.News.Sources) > 0 {
+		log.Printf("期货新闻：后台每 %s 抓一次（源：%s，可在「期货新闻」页手动刷新）",
+			cfg.FuturesNewsEvery, cfg.FuturesNewsSources)
+		go api.RefreshFuturesNewsLoop(warmCtx, srvAPI)
 	}
 	if srvAPI.Backfill != nil {
 		log.Printf("期货 1 分钟历史：后台补全已启动（约每 600ms 一个请求，可在「本地期货」页暂停）")

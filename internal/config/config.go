@@ -21,6 +21,12 @@ type Config struct {
 	FuturesSyncEvery   time.Duration
 	FuturesSyncPeriods string
 	FuturesSyncWorkers int
+	FuturesSyncDerive  bool          // 1 分钟够深时，其他分钟周期本地合成（不再各问上游要一遍）
+	FuturesNews        bool          // 后台定时抓期货新闻。0 = 关闭
+	FuturesNewsEvery   time.Duration // 抓取间隔
+	FuturesNewsSources string        // 新闻源，逗号分隔（sina / eastmoney）
+	FuturesNewsLimit   int           // 列表最多返回多少条
+	FuturesNewsColumn  string        // 东财快讯栏目号 fastColumn（默认 102 = 国际财经，含商品）
 }
 
 // Load 读取环境变量；若存在 .env 则先填入尚未设置的键（不覆盖已有环境变量）。
@@ -43,6 +49,12 @@ func Load() Config {
 		FuturesSyncEvery:   getenvDuration("FUTURES_SYNC_EVERY", 30*time.Minute),
 		FuturesSyncPeriods: getenv("FUTURES_SYNC_PERIODS", "1d,5,15,30,60,120"),
 		FuturesSyncWorkers: getenvInt("FUTURES_SYNC_WORKERS", 4),
+		FuturesSyncDerive:  getenvBool("FUTURES_SYNC_DERIVE", true),
+		FuturesNews:        getenvBool("FUTURES_NEWS", true),
+		FuturesNewsEvery:   getenvDuration("FUTURES_NEWS_EVERY", 5*time.Minute),
+		FuturesNewsSources: getenv("FUTURES_NEWS_SOURCES", "eastmoney,sina"),
+		FuturesNewsLimit:   getenvInt("FUTURES_NEWS_LIMIT", 200),
+		FuturesNewsColumn:  getenv("FUTURES_NEWS_EM_COLUMN", "102"),
 	}
 }
 

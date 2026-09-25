@@ -24,14 +24,16 @@ import (
 const Version = "0.1.0"
 
 type Server struct {
-	Store    *store.Store
-	Jobs     *job.Manager
-	Sched    *job.Scheduler
-	Cfg      config.Config
-	Watch    *futures.Watcher
-	Bars     *futuresync.StoredSource // 回测/研究用：本地优先，缺数据走网络并回写
-	Backfill *futuresync.Backfiller   // 后台慢慢补 1 分钟历史
-	cronFn   func()
+	Store     *store.Store
+	Jobs      *job.Manager
+	Sched     *job.Scheduler
+	Cfg       config.Config
+	Watch     *futures.Watcher
+	Bars      *futuresync.StoredSource // 回测/研究用：本地优先，缺数据走网络并回写
+	Backfill  *futuresync.Backfiller   // 后台慢慢补 1 分钟历史
+	Contracts *futures.ContractCache   // 主力月份合约缓存（页面要按「主连/月份」分别补全）
+	News      *futures.NewsHub         // 期货新闻（多源抓取 + 去重排序）
+	cronFn    func()
 }
 
 func New(st *store.Store, jobs *job.Manager, sched *job.Scheduler, cfg config.Config, cronFn func()) *Server {
@@ -39,6 +41,12 @@ func New(st *store.Store, jobs *job.Manager, sched *job.Scheduler, cfg config.Co
 		Store: st, Jobs: jobs, Sched: sched, Cfg: cfg, cronFn: cronFn,
 		Watch: futures.NewDefaultWatcher(),
 		Bars:  futuresync.NewStoredSource(st, futures.NewMultiSource(futures.DefaultSources()...)),
+		// 解析一次要打一次接口，所以结果缓存 30 分钟；页面轮询读的都是缓存
+		Contracts: futures.NewContractCache(futures.NewSinaContracts(nil), 30*time.Minute),
+	}
+	if cfg.FuturesNews {
+		names := strings.Split(cfg.FuturesNewsSources, ",")
+		srv.News = futures.NewNewsHub(futures.NewsSourcesByName(names, cfg.FuturesNewsColumn)...)
 	}
 	srv.Backfill = futuresync.NewBackfiller(st, srv.Bars.Cache, srv.Bars.Live)
 	srv.Watch.OnEvents = srv.pushFuturesAlerts // 系统级提醒：飞书 / 本机通知
@@ -312,6 +320,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/futures/favorites/scan", s.futuresFavoritesScan)
 	mux.HandleFunc("GET /api/futures/local", s.futuresLocal)
 	mux.HandleFunc("POST /api/futures/local/backfill", s.futuresLocalBackfill)
+	mux.HandleFunc("GET /api/futures/local/progress", s.futuresLocalProgress)
+	mux.HandleFunc("GET /api/futures/news", s.futuresNews)
+	mux.HandleFunc("POST /api/futures/news/refresh", s.futuresNewsRefresh)
 	mux.HandleFunc("POST /api/futures/local/pause", s.futuresLocalPause)
 	mux.HandleFunc("POST /api/futures/local/resume", s.futuresLocalResume)
 	mux.HandleFunc("GET /api/futures/contracts", s.futuresContracts)

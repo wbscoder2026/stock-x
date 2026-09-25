@@ -142,6 +142,7 @@ type WarmConfig struct {
 	Prefixes []string
 	Workers  int
 	Interval time.Duration
+	Derive   bool // 本地 1 分钟够深时，其他分钟周期改本地合成
 	Progress func(done, total int, msg string)
 	OnRound  func(Stats)
 }
@@ -175,6 +176,7 @@ func Warm(ctx context.Context, st *store.Store, cache *BarCache, sources []futur
 			Prefixes: cfg.Prefixes,
 			Workers:  cfg.Workers,
 			Cache:    cache,
+			Derive:   cfg.Derive,
 			Progress: cfg.Progress,
 		})
 		if err != nil {
