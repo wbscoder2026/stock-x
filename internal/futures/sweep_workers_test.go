@@ -71,12 +71,15 @@ func TestSweepRunTuneScalesUpMidRun(t *testing.T) {
 	const tasks = 8
 	release := make(chan struct{})
 	var inFlight, peak atomic.Int64
-	var wg sync.WaitGroup
+	var wg sync.WaitGroup  // 只等 Submit 返回：任务被池子接纳
+	var ran sync.WaitGroup // 等任务体真正跑完，不然下面查 inFlight 会撞上还没退出的那根
 	for i := 0; i < tasks; i++ {
 		wg.Add(1)
+		ran.Add(1)
 		go func() {
 			defer wg.Done()
 			if err := pool.Submit(func() {
+				defer ran.Done()
 				n := inFlight.Add(1)
 				for {
 					old := peak.Load()
@@ -87,6 +90,7 @@ func TestSweepRunTuneScalesUpMidRun(t *testing.T) {
 				<-release
 				inFlight.Add(-1)
 			}); err != nil {
+				ran.Done() // 没跑起来也要配对，别让 ran.Wait 卡死
 				t.Errorf("提交任务失败：%v", err)
 			}
 		}()
@@ -116,7 +120,8 @@ func TestSweepRunTuneScalesUpMidRun(t *testing.T) {
 	}
 
 	close(release)
-	wg.Wait()
+	wg.Wait()  // 8 个任务都被池子接纳了
+	ran.Wait() // 并且都真的退出了，这时 inFlight 才一定是 0
 	if got := peak.Load(); got != 4 {
 		t.Fatalf("峰值并发应为 4：%d", got)
 	}

@@ -18,6 +18,11 @@ import type { FuturesNewsItem, FuturesNewsReport } from '../types'
 const PROVIDER_LABEL: Record<string, string> = {
   sina: '新浪',
   eastmoney: '东财',
+  emnews: '东财资讯',
+}
+
+function providerLabel(name: string) {
+  return PROVIDER_LABEL[name] ?? name
 }
 
 // 相对时间：新闻讲究「多新」，光显示绝对时间不够直观
@@ -78,7 +83,8 @@ export default function FuturesNewsPage() {
     }
   }
 
-  const items = data?.items ?? []
+  // 依赖 data 而不是 data?.items：后者每次渲染都是新数组，会让下面的 useMemo 白算
+  const items = useMemo(() => data?.items ?? [], [data])
 
   const tags = useMemo(() => {
     const set = new Set<string>()
@@ -102,6 +108,12 @@ export default function FuturesNewsPage() {
 
   const failed = (data?.sources ?? []).filter((s) => !s.ok)
 
+  // 来源按钮按实际抓到的源生成：配置里加了 emnews 之类的源也能筛，不用改代码
+  const providers = useMemo(() => {
+    const set = new Set(items.map((it) => it.provider).filter(Boolean))
+    return [...set].sort()
+  }, [items])
+
   return (
     <div className="page-wrap">
       <Space style={{ marginBottom: 12 }} wrap>
@@ -114,8 +126,7 @@ export default function FuturesNewsPage() {
           onChange={(v) => setProvider(String(v))}
           options={[
             { value: 'all', label: '全部来源' },
-            { value: 'eastmoney', label: '东财' },
-            { value: 'sina', label: '新浪' },
+            ...providers.map((p) => ({ value: p, label: providerLabel(p) })),
           ]}
         />
         <Select
@@ -144,7 +155,7 @@ export default function FuturesNewsPage() {
           message={
             <span>
               有 {failed.length} 个源没抓到（不影响其他源）：
-              {failed.map((s) => `${PROVIDER_LABEL[s.name] ?? s.name} ${s.error ?? ''}`).join('；')}
+              {failed.map((s) => `${providerLabel(s.name)} ${s.error ?? ''}`).join('；')}
             </span>
           }
         />
@@ -183,7 +194,7 @@ function NewsRow({ item, now }: { item: FuturesNewsItem; now: number }) {
           </Tag>
         ) : null}
         <Tag color={item.provider === 'eastmoney' ? 'orange' : 'red'} style={{ marginInlineEnd: 0, fontSize: 11 }}>
-          {PROVIDER_LABEL[item.provider] ?? item.provider}
+          {providerLabel(item.provider)}
         </Tag>
         {item.media ? (
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>

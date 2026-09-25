@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -9,6 +10,22 @@ import (
 	"github.com/wbscoder2026/stock-x/internal/futures"
 	"github.com/wbscoder2026/stock-x/internal/store"
 )
+
+// newsIntervalText 给页面用的间隔文案（页面直接拼在「每 … 自动抓一次」里）。
+// time.Duration.String() 出来是「5m0s」，读着别扭，整分整时就说人话。
+func newsIntervalText(d time.Duration) string {
+	if d <= 0 {
+		d = 5 * time.Minute
+	}
+	switch {
+	case d%(60*time.Minute) == 0:
+		return fmt.Sprintf("%d 小时", int(d/(60*time.Minute)))
+	case d%time.Minute == 0:
+		return fmt.Sprintf("%d 分钟", int(d/time.Minute))
+	default:
+		return d.String()
+	}
+}
 
 // futuresNews 新闻列表：默认读库（按时间从新到旧），没抓过或要求刷新时才打网络。
 func (s *Server) futuresNews(w http.ResponseWriter, r *http.Request) {
@@ -34,7 +51,7 @@ func (s *Server) futuresNews(w http.ResponseWriter, r *http.Request) {
 		"sources":  status,
 		"updated":  at.Format("2006-01-02 15:04:05"),
 		"count":    len(items),
-		"interval": s.Cfg.FuturesNewsEvery.String(),
+		"interval": newsIntervalText(s.Cfg.FuturesNewsEvery),
 	})
 }
 

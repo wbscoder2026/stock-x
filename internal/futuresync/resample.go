@@ -174,19 +174,6 @@ func DerivePeriod(st *store.Store, cache *BarCache, symbol, period string) (int,
 	return saved, nil
 }
 
-// DerivePeriods 一次合成多个周期（跳过基频与日线）。
-func DerivePeriods(st *store.Store, cache *BarCache, symbol string, periods []string) (int, error) {
-	total := 0
-	for _, period := range periods {
-		n, err := DerivePeriod(st, cache, symbol, period)
-		if err != nil {
-			return total, err
-		}
-		total += n
-	}
-	return total, nil
-}
-
 // shouldDerive 这个周期该本地合成还是照旧问上游要？
 //
 // 判据是「本地 1 分钟有没有挖到这个周期前面」：

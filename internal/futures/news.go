@@ -45,11 +45,10 @@ type NewsSourceStatus struct {
 type NewsHub struct {
 	Sources []NewsSource
 
-	mu       sync.Mutex
-	last     []NewsItem
-	status   []NewsSourceStatus
-	fetched  time.Time
-	fetching bool
+	mu      sync.Mutex
+	last    []NewsItem
+	status  []NewsSourceStatus
+	fetched time.Time
 }
 
 func NewNewsHub(sources ...NewsSource) *NewsHub {
@@ -123,30 +122,6 @@ func (h *NewsHub) Latest() ([]NewsItem, []NewsSourceStatus, time.Time) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.last, h.status, h.fetched
-}
-
-// RefreshAsync 后台抓一轮；同一时刻只跑一个，避免轮询把源打爆。
-func (h *NewsHub) RefreshAsync(limit int) {
-	if h == nil || len(h.Sources) == 0 {
-		return
-	}
-	h.mu.Lock()
-	if h.fetching {
-		h.mu.Unlock()
-		return
-	}
-	h.fetching = true
-	h.mu.Unlock()
-	go func() {
-		defer func() {
-			h.mu.Lock()
-			h.fetching = false
-			h.mu.Unlock()
-		}()
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		_, _, _ = h.Refresh(ctx, limit)
-	}()
 }
 
 // mergeNews 去重 + 按时间从新到旧排序。
